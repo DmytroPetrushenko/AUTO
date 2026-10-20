@@ -376,3 +376,21 @@ def test_history_preview_navigation_requires_explicit_confirmation(ui, engine, m
     assert not ui.exception
     assert ui.session_state["page"] == "registry"
     assert get_vehicle(engine, vehicle.id).military_number == "HISTORY"
+
+
+def test_notes_equipment_and_document_download_ui(ui, engine, minimum, actor):
+    from auto.records import list_equipment, list_notes, save_document
+
+    vehicle = save_vehicle(engine, minimum, actor)
+    save_document(engine, vehicle.id, {"kind": "Акт"}, [("test.pdf", b"%PDF-1.4\n%%EOF")], actor)
+    ui.run()
+    ui.button(key="open_vehicle").click().run()
+    assert not ui.exception
+    ui.text_area(key="note_text").set_value("UI note")
+    next(b for b in ui.button if b.label == "Зберегти примітку").click().run()
+    assert not ui.exception
+    assert list_notes(engine, vehicle.id, actor)[0].text == "UI note"
+    next(t for t in ui.text_input if t.label == "Назва обладнання").set_value("UI Radio")
+    next(b for b in ui.button if b.label == "Зберегти обладнання").click().run()
+    assert not ui.exception
+    assert list_equipment(engine, vehicle.id, actor)[0].name == "UI Radio"

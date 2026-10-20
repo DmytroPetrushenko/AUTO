@@ -265,3 +265,68 @@ LOOKUPS = {
     "fuel_types": FuelType,
     "units": Unit,
 }
+
+
+class VehicleDocument(Base, table=True):
+    __tablename__ = "vehicle_documents"
+    id: str = Field(default_factory=lambda: str(uuid4()), primary_key=True)
+    vehicle_id: str = Field(foreign_key="vehicles.id", index=True)
+    version: int = 1
+
+
+class DocumentVersion(Base, table=True):
+    __tablename__ = "vehicle_document_versions"
+    __table_args__ = (UniqueConstraint("document_id", "version"),)
+    id: str = Field(default_factory=lambda: str(uuid4()), primary_key=True)
+    document_id: str = Field(foreign_key="vehicle_documents.id", index=True)
+    version: int
+    details: dict = Field(sa_column=Column(JSON, nullable=False))
+    created_at: datetime = Field(default_factory=utcnow)
+    created_by: str
+
+
+class DocumentFile(Base, table=True):
+    __tablename__ = "vehicle_document_files"
+    id: str = Field(default_factory=lambda: str(uuid4()), primary_key=True)
+    version_id: str = Field(foreign_key="vehicle_document_versions.id", index=True)
+    original_name: str
+    relative_path: str = Field(unique=True)
+    sha256: str
+    size: int
+
+
+class VehicleEquipment(Base, table=True):
+    __tablename__ = "vehicle_equipment"
+    id: str = Field(default_factory=lambda: str(uuid4()), primary_key=True)
+    vehicle_id: str = Field(foreign_key="vehicles.id", index=True)
+    name: str
+    quantity: float
+    installed_on: date | None = None
+    removed_on: date | None = None
+    is_removed: bool = False
+    note: str | None = None
+    version: int = 1
+
+
+class VehicleNote(Base, table=True):
+    __tablename__ = "vehicle_notes"
+    id: str = Field(default_factory=lambda: str(uuid4()), primary_key=True)
+    vehicle_id: str = Field(foreign_key="vehicles.id", index=True)
+    text: str
+    is_hidden: bool = False
+    version: int = 1
+    created_at: datetime = Field(default_factory=utcnow)
+    created_by: str
+    updated_at: datetime = Field(default_factory=utcnow)
+
+
+class NoteVersion(Base, table=True):
+    __tablename__ = "vehicle_note_versions"
+    __table_args__ = (UniqueConstraint("note_id", "version"),)
+    id: int | None = Field(default=None, primary_key=True)
+    note_id: str = Field(foreign_key="vehicle_notes.id", index=True)
+    version: int
+    text: str
+    is_hidden: bool
+    created_at: datetime = Field(default_factory=utcnow)
+    created_by: str

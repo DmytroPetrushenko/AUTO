@@ -558,6 +558,15 @@ def delete_vehicle(engine, vehicle_id, actor, *, expected_version, reason, confi
         ):
             raise BusinessError("Списані та втрачені картки не видаляються")
         blockers = []
+        from auto.models import VehicleDocument, VehicleEquipment, VehicleNote
+
+        for model, label in (
+            (VehicleDocument, "документи з вкладеннями"),
+            (VehicleEquipment, "обладнання"),
+            (VehicleNote, "примітки"),
+        ):
+            if session.exec(select(model).where(model.vehicle_id == vehicle_id)).first():
+                blockers.append(label)
         if session.exec(
             select(VehicleDocumentLock).where(VehicleDocumentLock.vehicle_id == vehicle_id)
         ).first():

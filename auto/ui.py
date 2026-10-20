@@ -92,6 +92,13 @@ def cached_engine(path):
     return make_engine(path)
 
 
+@st.cache_resource
+def running_guard(path):
+    from auto.runtime import RunningLock
+
+    return RunningLock(path)
+
+
 def widget_key(field):
     return f"card_{field}"
 
@@ -502,10 +509,9 @@ def card_page(engine, actor):
                 st.warning("Неповні дані збереженої картки: " + ", ".join(missing))
     with tabs[3]:
         history_panel(engine, actor)
-    for tab, name in zip(tabs[4:], ("Документи", "Обладнання", "Примітки"), strict=True):
-        with tab:
-            st.subheader(name)
-            st.info("Ця функція передбачена наступним етапом ТЗ.")
+    from auto.ui_records import panels
+
+    panels(engine, actor, tabs[4:])
 
 
 def filter_lookup(engine, kind, label, key):
@@ -700,6 +706,7 @@ def main():
         return
     engine = cached_engine(path)
     try:
+        running_guard(path)
         require_current_schema(engine)
         actor = local_actor()
     except (RuntimeError, ValueError, SQLAlchemyError) as exc:

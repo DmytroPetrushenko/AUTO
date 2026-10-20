@@ -59,6 +59,8 @@ def verified_backup(path: Path, target_dir: Path, attachments: Path | None = Non
         if destination.execute("PRAGMA foreign_key_check").fetchall():
             raise RuntimeError("Резервна копія містить порушені зовнішні ключі")
     if attachments and attachments.exists():
+        if attachments.is_symlink() or any(p.is_symlink() for p in attachments.rglob("*")):
+            raise RuntimeError("Символічні посилання у вкладеннях заборонені")
         shutil.copytree(attachments, target_dir / "attachments")
     return target
 
@@ -88,7 +90,9 @@ def migrate(path: Path, backup_root: Path | None = None) -> Path | None:
         if tables:
             root = backup_root or path.parent / "backups"
             stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
-            backup = verified_backup(path, root / stamp, path.parent / "attachments")
+            from auto.backup import backup_bundle
+
+            backup = backup_bundle(path, root / stamp) / path.name
         with engine.begin() as connection:
             # Existing connection ensures foreign_keys=ON for Alembic too.
             config.attributes["connection"] = connection
