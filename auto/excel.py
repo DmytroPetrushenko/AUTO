@@ -13,7 +13,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, select
 
 from auto.constants import normalize
-from auto.history import IDENTIFIERS, _digest, preview_vehicle
+from auto.history import IDENTIFIERS, _digest, duplicate_matches, preview_vehicle
 from auto.models import ImportBatch, ImportReceipt, Personnel, Vehicle
 from auto.records import require_reader, validate_upload
 from auto.schemas import VehicleInput
@@ -197,7 +197,14 @@ def headers(content, sheet, header_row=1):
         w.close()
 
 
+class ImportRowError(BusinessError):
+    def __init__(self, issues):
+        self.issues = list(dict.fromkeys(issues))
+        super().__init__("; ".join(self.issues))
+
+
 def _resolve(engine, values):
+    issues = []
     data = {k: v for k, v in values.items() if k in VehicleInput.model_fields}
     for field in list(data):
         definition = VehicleInput.model_fields[field]
@@ -213,39 +220,52 @@ def _resolve(engine, values):
         if field == "model":
             matches = [r for r in matches if r.brand_id == data.get("brand_id")]
         if len(matches) != 1:
-            raise BusinessError(
+            issues.append(
                 f"Довідник {HEADERS.get(field, field)}: "
                 f"немає однозначного активного значення «{value}»"
             )
-        data[field + "_id"] = matches[0].id
+        else:
+            data[field + "_id"] = matches[0].id
     if values.get("mvo"):
         if not isinstance(values["mvo"], str):
-            raise BusinessError("МВО має бути текстовим ПІБ")
-        with Session(engine) as session:
-            matches = [
-                p
-                for p in session.exec(select(Personnel)).all()
-                if p.is_active
-                and normalize(" ".join(filter(None, [p.last_name, p.first_name, p.patronymic])))
-                == normalize(values["mvo"])
-            ]
-        if len(matches) != 1:
-            raise BusinessError("МВО: ПІБ не має однозначного активного збігу")
-        data["mvo_id"] = matches[0].id
+            issues.append("МВО має бути текстовим ПІБ")
+        elif isinstance(values["mvo"], str):
+            with Session(engine) as session:
+                matches = [
+                    p
+                    for p in session.exec(select(Personnel)).all()
+                    if p.is_active
+                    and normalize(" ".join(filter(None, [p.last_name, p.first_name, p.patronymic])))
+                    == normalize(values["mvo"])
+                ]
+            if len(matches) != 1:
+                issues.append("МВО: ПІБ не має однозначного активного збігу")
+            else:
+                data["mvo_id"] = matches[0].id
     for f in IDENTIFIERS:
         value = data.get(f)
         if value is None:
             continue
         if not isinstance(value, str):
-            raise BusinessError(f"{f}: числовий ідентифікатор потребує ручного перегляду")
-        if normalize(value) in ("б/н", "бн", "----", "-", "невідомо"):
-            raise BusinessError(f"{f}: неоднозначне позначення замість ідентифікатора")
+            issues.append(f"{f}: числовий ідентифікатор потребує ручного перегляду")
+        elif normalize(value) in ("б/н", "бн", "----", "-", "невідомо"):
+            issues.append(f"{f}: неоднозначне позначення замість ідентифікатора")
     if (
         isinstance(data.get("accounting_status"), str)
         and normalize(data["accounting_status"]) == "вибула"
     ):
         data["accounting_status"] = "Передано"
-    return VehicleInput.model_validate(data).model_dump()
+    try:
+        result = VehicleInput.model_validate(data).model_dump()
+    except ValidationError as exc:
+        for error in exc.errors(include_url=False, include_input=False):
+            field = str(error["loc"][0]) if error["loc"] else "Картка"
+            if field in IDENTIFIERS and any(i.startswith(field + ":") for i in issues):
+                continue
+            issues.append(f"{field}: {error['msg']}")
+    if issues:
+        raise ImportRowError(issues)
+    return result
 
 
 def preview_import(
@@ -260,11 +280,14 @@ def preview_import(
     use_cached=False,
     overrides=None,
     source_name="import.xlsx",
+    required_explicit=None,
 ):
     require_editor(actor)
     validate_upload("import.xlsx", content)
     if set(mapping) - set(INPUT_FIELDS):
         raise BusinessError("Невідомі поля мапінгу")
+    if set(required_explicit or []) - set(INPUT_FIELDS):
+        raise BusinessError("Невідомі поля явного погодження")
     raw = _load(content, data_only=False)
     cache = _load(content, data_only=True)
     if sheet not in raw.sheetnames or not 1 <= header_row <= 50:
@@ -285,8 +308,15 @@ def preview_import(
             values = dict(defaults or {})
             errors = []
             formulas = []
+            source_cells = {}
+            unchecked = {}
             for field, col in colmap.items():
                 cell = s.cell(index, col)
+                source_cells[field] = {
+                    "cell": cell.coordinate,
+                    "type": cell.data_type,
+                    "format": cell.number_format,
+                }
                 value = cell.value
                 if cell.data_type == "f":
                     cached = cache[sheet][cell.coordinate]
@@ -295,8 +325,10 @@ def preview_import(
                     )
                     if not use_cached:
                         errors.append(f"{cell.coordinate}: формула потребує явного вибору кешу")
+                        unchecked[field] = "Формула без погодженого використання кешу"
                     if cached.value is None or cached.data_type == "e":
                         errors.append(f"{cell.coordinate}: відсутній/помилковий кеш")
+                        unchecked[field] = "Відсутній/помилковий кеш"
                     value = cached.value
                 if cell.data_type == "e":
                     errors.append(f"{cell.coordinate}: помилка Excel")
@@ -304,9 +336,47 @@ def preview_import(
             values.update((overrides or {}).get(str(index), {}))
             # Coordinates are never an import target; extra source columns remain untouched.
             values = {k: v for k, v in values.items() if k in INPUT_FIELDS}
+            for field in required_explicit or []:
+                value = values.get(field)
+                if value is None or (isinstance(value, str) and not value.strip()):
+                    errors.append(f"{field}: потрібне явне значення; типове не є фактом джерела")
             data = None
             plan = None
             incoming = []
+            duplicates = []
+            checked = []
+            # Diagnostics must not disappear because another column is invalid.
+            # Numeric/formula/placeholder identifiers remain unconfirmed, never auto-coerced.
+            with Session(engine) as session:
+                for f in IDENTIFIERS:
+                    value = values.get(f)
+                    if f in unchecked:
+                        continue
+                    if value is None or value == "":
+                        continue
+                    if not isinstance(value, str):
+                        unchecked[f] = "Числове подання потребує ручного погодження"
+                        continue
+                    n = normalize(value)
+                    if not n or n in ("б/н", "бн", "----", "-", "невідомо"):
+                        unchecked[f] = "Порожній/неоднозначний ідентифікатор"
+                        continue
+                    checked.append(f)
+                    matches = duplicate_matches(session, f, value)
+                    if matches:
+                        duplicates.append(
+                            {
+                                "field": f,
+                                "value": value,
+                                "matches": matches,
+                                "approval_required": True,
+                            }
+                        )
+                    key = (f, n)
+                    if key in seen:
+                        incoming.append({"field": f, "source_row": seen[key]})
+                    else:
+                        seen[key] = index
             fingerprint = None
             try:
                 data = _resolve(engine, values)
@@ -322,27 +392,35 @@ def preview_import(
                     errors.append("Ідентичний рядок уже є у вибірці; потрібне ручне рішення")
                 seen_fingerprints.add(fingerprint)
                 plan = preview_vehicle(engine, data, actor)
-                for f in IDENTIFIERS:
-                    n = normalize(data.get(f))
-                    if n:
-                        key = (f, n)
-                        if key in seen:
-                            incoming.append({"field": f, "source_row": seen[key]})
-                        else:
-                            seen[key] = index
+            except ImportRowError as exc:
+                errors.extend(exc.issues)
             except (BusinessError, ValidationError, PermissionError) as exc:
                 errors.append(str(exc))
             rows.append(
                 {
                     "row": index,
+                    "source": {"file": source_name, "sheet": sheet, "row": index},
+                    "source_cells": source_cells,
                     "input": values,
                     "data": data,
                     "errors": errors,
                     "formulas": formulas,
-                    "duplicates": plan["duplicates"] if plan else [],
+                    "duplicates": duplicates,
+                    "duplicate_checked_fields": checked,
+                    "duplicate_unchecked_fields": {
+                        f: reason for f, reason in unchecked.items() if f in IDENTIFIERS
+                    },
                     "incoming": incoming,
                     "fingerprint": fingerprint,
                     "plan_token": plan["token"] if plan else None,
+                    "applied_defaults": {
+                        f: data[f]
+                        for f, definition in VehicleInput.model_fields.items()
+                        if data is not None
+                        and not definition.is_required()
+                        and definition.default is not None
+                        and values.get(f) is None
+                    },
                 }
             )
     finally:
@@ -356,6 +434,7 @@ def preview_import(
         "use_cached": use_cached,
         "overrides": overrides or {},
         "source_name": source_name,
+        "required_explicit": list(required_explicit or []),
     }
     preview = {
         "rows": rows,

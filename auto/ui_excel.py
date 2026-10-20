@@ -141,6 +141,8 @@ def import_page(engine, actor):
                         "Рядок": r["row"],
                         "Помилки": " | ".join(r["errors"]),
                         "Збіги": str(r["duplicates"] + r["incoming"]),
+                        "Типові значення (не факти джерела)": str(r["applied_defaults"]),
+                        "ID не перевірено": str(r["duplicate_unchecked_fields"]),
                     }
                     for r in p["rows"]
                 ]
