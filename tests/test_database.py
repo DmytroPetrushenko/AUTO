@@ -25,7 +25,7 @@ def test_migration_idempotent_and_schema_matches(engine):
     from pathlib import Path
 
     assert migrate(Path(engine.url.database)) is None
-    assert len(list_lookup(engine, "vehicle_types")) == 13
+    assert len(list_lookup(engine, "vehicle_types")) == 12
 
 
 def test_foreign_keys_reject_missing_brand(engine):
@@ -105,3 +105,58 @@ def test_backup_preserves_vehicle_and_relationships(engine, minimum, actor, tmp_
             assert len(session.exec(select(Vehicle)).all()) == 1
     finally:
         restored.dispose()
+
+
+def test_correction_removes_unused_type_and_preserves_other_ids(tmp_path):
+    path = tmp_path / "correction.sqlite3"
+    command.upgrade(alembic_config(path), "0002")
+    with sqlite3.connect(path) as connection:
+        before = connection.execute(
+            "SELECT id, name FROM vehicle_types WHERE normalized_name != 'motoleader ml900atv'"
+        ).fetchall()
+        # Match the local database: the erroneous entry was already deactivated.
+        connection.execute(
+            "UPDATE vehicle_types SET is_active = 0 WHERE normalized_name = 'motoleader ml900atv'"
+        )
+    backup = migrate(path)
+    assert backup.exists()
+    with sqlite3.connect(path) as connection:
+        assert connection.execute("SELECT id, name FROM vehicle_types").fetchall() == before
+        assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
+    with sqlite3.connect(backup) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM vehicle_types").fetchone()[0] == 13
+
+
+def test_correction_preserves_vehicles_using_old_type(tmp_path, actor):
+    from auto.services import save_lookup
+
+    path = tmp_path / "referenced.sqlite3"
+    command.upgrade(alembic_config(path), "0002")
+    engine = make_engine(path)
+    try:
+        brand = save_lookup(engine, "vehicle_brands", "Test", actor)
+        model = save_lookup(engine, "vehicle_models", "Model", actor, brand_id=brand.id)
+        old_type = next(
+            t
+            for t in list_lookup(engine, "vehicle_types")
+            if t.normalized_name == "motoleader ml900atv"
+        )
+        vehicle = save_vehicle(
+            engine,
+            dict(
+                brand_id=brand.id,
+                model_id=model.id,
+                vehicle_type_id=old_type.id,
+                support_service_id=1,
+                work_unit="км",
+            ),
+            actor,
+        )
+        migrate(path)
+        assert old_type.id not in [t.id for t in list_lookup(engine, "vehicle_types")]
+        with Session(engine) as session:
+            assert session.get(Vehicle, vehicle.id).vehicle_type_id == old_type.id
+        with engine.connect() as connection:
+            assert connection.exec_driver_sql("PRAGMA foreign_key_check").fetchall() == []
+    finally:
+        engine.dispose()
