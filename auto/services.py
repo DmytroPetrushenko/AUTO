@@ -3,7 +3,6 @@ import os
 from dataclasses import dataclass
 from enum import StrEnum
 
-from sqlalchemy import update
 from sqlmodel import Session, select
 
 from auto.constants import ARCHIVED_STATUSES, normalize
@@ -13,9 +12,7 @@ from auto.models import (
     Personnel,
     Vehicle,
     VehicleModel,
-    utcnow,
 )
-from auto.schemas import VehicleInput
 
 
 class Role(StrEnum):
@@ -130,20 +127,11 @@ def save_lookup(engine, kind, name, actor, *, entry_id=None, brand_id=None, is_a
 
 
 def add_person(engine, first_name, last_name, actor, **optional):
-    require_editor(actor)
-    if not first_name.strip() or not last_name.strip():
-        raise BusinessError("Ім'я та прізвище обов'язкові")
-    allowed = {"patronymic", "rank", "position", "unit_id", "personal_number"}
-    if set(optional) - allowed:
-        raise BusinessError("Невідомі поля персоналу")
-    with Session(engine) as session:
-        person = Personnel(first_name=first_name, last_name=last_name, **optional)
-        session.add(person)
-        session.flush()
-        audit(session, actor, "personnel", person.id, "create", {}, person.model_dump(mode="json"))
-        session.commit()
-        session.refresh(person)
-        return person
+    from auto.personnel import save_person
+
+    return save_person(
+        engine, {"first_name": first_name, "last_name": last_name, **optional}, actor
+    )
 
 
 def validate_references(session, card, old):
@@ -162,75 +150,26 @@ def validate_references(session, card, old):
         entry = session.get(LOOKUPS[kind], value)
         if entry is None or (not entry.is_active and (old is None or getattr(old, field) != value)):
             raise BusinessError(f"Оберіть активне значення довідника: {kind}")
+    if card.mvo_id is not None:
+        person = session.get(Personnel, card.mvo_id)
+        if not person or (not person.is_active and (old is None or old.mvo_id != card.mvo_id)):
+            raise BusinessError("Оберіть активну особу МВО")
     if session.get(VehicleModel, card.model_id).brand_id != card.brand_id:
         raise BusinessError("Модель не належить обраній марці")
 
 
-def save_vehicle(engine, data, actor, *, vehicle_id=None, expected_version=None):
-    require_editor(actor)
-    card = VehicleInput.model_validate(data)
-    with Session(engine) as session:
-        # Serialize checks and writes so two simultaneous creates cannot bypass duplicate checks.
-        session.connection().exec_driver_sql("BEGIN IMMEDIATE")
-        old = session.get(Vehicle, vehicle_id) if vehicle_id else None
-        if vehicle_id and old is None:
-            raise BusinessError("Автомобіль не знайдено")
-        if old and expected_version != old.version:
-            raise ConflictError("Картку вже змінено. Перезавантажте її та узгодьте зміни")
-        validate_references(session, card, old)
-        values = card.model_dump()
-        for field in ("military_number", "vin", "chassis_number", "serial_number"):
-            normalized = normalize(values[field])
-            values[field + "_normalized"] = normalized
-            if normalized:
-                statement = select(Vehicle).where(
-                    getattr(Vehicle, field + "_normalized") == normalized,
-                )
-                if old:
-                    statement = statement.where(Vehicle.id != old.id)
-                matches = session.exec(statement).all()
-                if matches:
-                    ids = ", ".join(v.id for v in matches)
-                    raise BusinessError(
-                        f"Повтор {field}; картки зі збігом: {ids}. "
-                        "Погодження винятків буде доступне наступним етапом.",
-                    )
-        before = old.model_dump(mode="json") if old else {}
-        if old:
-            values.update(updated_at=utcnow(), updated_by=actor.user_id, version=old.version + 1)
-            result = session.execute(
-                update(Vehicle)
-                .where(
-                    Vehicle.id == old.id,
-                    Vehicle.version == expected_version,
-                )
-                .values(**values)
-            )
-            if result.rowcount != 1:
-                raise ConflictError("Конфлікт версій картки")
-            session.refresh(old)
-            vehicle = old
-        else:
-            vehicle = Vehicle(**values, created_by=actor.user_id, updated_by=actor.user_id)
-            session.add(vehicle)
-        session.flush()
-        audit(
-            session,
-            actor,
-            "vehicles",
-            vehicle.id,
-            "update" if old else "create",
-            before,
-            vehicle.model_dump(mode="json"),
-        )
-        session.commit()
-        session.refresh(vehicle)
-        return vehicle
+def save_vehicle(engine, data, actor, **options):
+    from auto.history import save_card
+
+    return save_card(engine, data, actor, **options)
 
 
 def get_vehicle(engine, vehicle_id):
+    from auto.history import projected_vehicle
+
     with Session(engine) as session:
-        return session.get(Vehicle, vehicle_id)
+        vehicle = session.get(Vehicle, vehicle_id)
+        return projected_vehicle(session, vehicle) if vehicle else None
 
 
 def completeness(vehicle):
@@ -254,32 +193,44 @@ def completeness(vehicle):
 
 
 def list_vehicles(engine, *, search="", include_archived=False, incomplete_only=False, **filters):
+    from auto.history import projected_vehicle
+
+    allowed = {
+        "unit_id",
+        "mvo_id",
+        "support_service_id",
+        "vehicle_type_id",
+        "accounting_status",
+        "technical_condition",
+        "technical_category",
+        "is_operated",
+    }
+    if set(filters) - allowed:
+        raise BusinessError("Невідомий фільтр")
     with Session(engine) as session:
-        statement = select(Vehicle)
-        if not include_archived and not filters.get("accounting_status"):
-            statement = statement.where(Vehicle.accounting_status.not_in(ARCHIVED_STATUSES))
-        allowed = {
-            "unit_id",
-            "support_service_id",
-            "vehicle_type_id",
-            "accounting_status",
-            "technical_condition",
-            "technical_category",
-            "is_operated",
-        }
-        if set(filters) - allowed:
-            raise BusinessError("Невідомий фільтр")
-        for field, value in filters.items():
-            if value is not None:
-                statement = statement.where(getattr(Vehicle, field) == value)
-        vehicles = session.exec(statement.order_by(Vehicle.created_at.desc(), Vehicle.id)).all()
+        vehicles = [
+            projected_vehicle(session, v)
+            for v in session.exec(
+                select(Vehicle).order_by(Vehicle.created_at.desc(), Vehicle.id)
+            ).all()
+        ]
         brands = {x.id: x.name for x in session.exec(select(LOOKUPS["vehicle_brands"])).all()}
         models = {x.id: x.name for x in session.exec(select(VehicleModel)).all()}
+        people = {
+            x.id: " ".join(filter(None, [x.last_name, x.first_name, x.patronymic]))
+            for x in session.exec(select(Personnel)).all()
+        }
         query = normalize(search)
         return [
             v
             for v in vehicles
-            if (not incomplete_only or completeness(v))
+            if (
+                include_archived
+                or filters.get("accounting_status")
+                or v.accounting_status not in ARCHIVED_STATUSES
+            )
+            and all(value is None or getattr(v, field) == value for field, value in filters.items())
+            and (not incomplete_only or completeness(v))
             and (
                 not query
                 or query
@@ -295,6 +246,7 @@ def list_vehicles(engine, *, search="", include_archived=False, incomplete_only=
                                     v.serial_number,
                                     brands.get(v.brand_id),
                                     models.get(v.model_id),
+                                    people.get(v.mvo_id),
                                 ],
                             )
                         )

@@ -35,7 +35,7 @@ def test_minimum_optional_numbers_and_no_reading(engine, minimum, actor):
     assert not hasattr(vehicle, "current_reading")
     assert vehicle.version == 1
     assert vehicle.technical_condition == vehicle.technical_category == "Не визначено"
-    assert len(list_audit(engine, vehicle.id)) == 1
+    assert {e.action for e in list_audit(engine, vehicle.id)} == {"create", "periods_reconciled"}
 
 
 @pytest.mark.parametrize(
@@ -138,7 +138,13 @@ def test_empty_identifiers_are_not_duplicates(engine, minimum, actor):
 
 
 def test_updates_keep_id_check_version_and_audit(engine, minimum, actor):
+    from auto.history import preview_vehicle, today
+
     vehicle = save_vehicle(engine, minimum | {"technical_category": "III"}, actor)
+    data = minimum | {"technical_category": "III", "technical_condition": "Несправний"}
+    preview = preview_vehicle(
+        engine, data, actor, vehicle_id=vehicle.id, expected_version=1, event_date=today()
+    )
     updated = save_vehicle(
         engine,
         minimum
@@ -149,13 +155,16 @@ def test_updates_keep_id_check_version_and_audit(engine, minimum, actor):
         actor,
         vehicle_id=vehicle.id,
         expected_version=1,
+        event_date=today(),
+        preview_token=preview["token"],
+        confirmed=True,
     )
     assert updated.id == vehicle.id
     assert updated.version == 2
     assert updated.technical_category == "III"
     with pytest.raises(ConflictError):
         save_vehicle(engine, minimum, actor, vehicle_id=vehicle.id, expected_version=1)
-    event = list_audit(engine, vehicle.id)[0]
+    event = next(e for e in list_audit(engine, vehicle.id) if e.action == "update")
     assert event.user_id == actor.user_id
     assert event.old_values["technical_condition"] == "Не визначено"
     assert event.new_values["technical_condition"] == "Несправний"
