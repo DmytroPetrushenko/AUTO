@@ -16,7 +16,18 @@ from auto.excel import (
     preview_import,
     workbook_bytes,
 )
+from auto.history import IDENTIFIERS
 from auto.services import Role, list_vehicles
+
+
+@st.cache_data(show_spinner=False, max_entries=3, ttl=600)
+def workbook_info(content):
+    return inspect_workbook(content)
+
+
+@st.cache_data(show_spinner=False, max_entries=6, ttl=600)
+def workbook_headers(content, sheet, header_row):
+    return headers(content, sheet, header_row)
 
 
 def exports(engine, actor, frame, vehicles):
@@ -64,11 +75,11 @@ def import_page(engine, actor):
         content = upload.getvalue()
         key = hashlib.sha256(content).hexdigest()
         try:
-            info = inspect_workbook(content)
+            info = workbook_info(content)
             st.dataframe(pd.DataFrame(info), hide_index=True)
             sheet = st.selectbox("Аркуш", [i["sheet"] for i in info], key="import_sheet_" + key)
             head = st.number_input("Рядок заголовків", min_value=1, max_value=50, value=1)
-            cols = headers(content, sheet, int(head))
+            cols = workbook_headers(content, sheet, int(head))
             with st.expander("Зіставлення колонок", expanded=True):
                 mapping = {}
                 for field in INPUT_FIELDS:
@@ -79,9 +90,9 @@ def import_page(engine, actor):
                             if name
                             in (field, HEADERS.get(field), "id" if field == "vehicle_id" else "")
                         ),
-                        None,
+                        "",
                     )
-                    ids = [None] + list(cols)
+                    ids = [""] + list(cols)
                     chosen = st.selectbox(
                         HEADERS.get(field, ui.LABELS.get(field, field)),
                         ids,
@@ -135,6 +146,18 @@ def import_page(engine, actor):
                 ]
                 st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
                 with st.expander("Ручні виправлення кандидатів"):
+                    identifiers = {}
+                    for row in p["rows"]:
+                        for field in IDENTIFIERS:
+                            original = row["input"].get(field)
+                            if original is not None and not isinstance(original, str):
+                                value = st.text_input(
+                                    f"Рядок {row['row']}: уточніть {HEADERS.get(field, field)} "
+                                    f"як текст (у файлі {original!r})",
+                                    key=f"id_text_{p['token']}_{row['row']}_{field}",
+                                )
+                                if value:
+                                    identifiers.setdefault(str(row["row"]), {})[field] = value
                     edit = pd.DataFrame([{"row": r["row"], **r["input"]} for r in p["rows"]])
                     edited = st.data_editor(
                         edit, disabled=["row"], key="import_editor_" + p["token"], num_rows="fixed"
@@ -144,6 +167,8 @@ def import_page(engine, actor):
                             str(int(r["row"])): {k: v for k, v in r.items() if k != "row"}
                             for r in edited.to_dict("records")
                         }
+                        for row, fields in identifiers.items():
+                            overrides[row].update(fields)
                         st.session_state.import_preview = preview_import(
                             engine,
                             content,

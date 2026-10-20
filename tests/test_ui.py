@@ -386,10 +386,11 @@ def test_notes_equipment_and_document_download_ui(ui, engine, minimum, actor):
     ui.run()
     ui.button(key="open_vehicle").click().run()
     assert not ui.exception
-    ui.text_area(key="note_text").set_value("UI note")
+    next(t for t in ui.text_area if t.label == "Текст примітки").set_value("UI note")
     next(b for b in ui.button if b.label == "Зберегти примітку").click().run()
     assert not ui.exception
     assert list_notes(engine, vehicle.id, actor)[0].text == "UI note"
+    assert next(t for t in ui.text_area if t.label == "Текст примітки").value == ""
     next(t for t in ui.text_input if t.label == "Назва обладнання").set_value("UI Radio")
     next(b for b in ui.button if b.label == "Зберегти обладнання").click().run()
     assert not ui.exception
@@ -474,8 +475,80 @@ def test_excel_import_preview_confirm_and_mapping_change_ui(ui, engine, minimum,
     ui.button(key="nav_excel").click().run()
     next(b for b in ui.button if b.label == "Побудувати попередній перегляд").click().run()
     assert not ui.exception and not list_vehicles(engine)
+    number_mapping = next(s for s in ui.selectbox if (s.key or "").endswith("_military_number"))
+    original_column = number_mapping.value
+    number_mapping.set_value("").run()
+    assert not any(b.label == "Виконати підтверджений імпорт" for b in ui.button)
+    ui.selectbox(key=number_mapping.key).set_value(original_column).run()
     next(b for b in ui.button if b.label == "Виконати підтверджений імпорт").click().run()
     assert not list_vehicles(engine) and any("підтвердження" in e.value for e in ui.error)
     ui.checkbox(key="import_confirmed").check().run()
     next(b for b in ui.button if b.label == "Виконати підтверджений імпорт").click().run()
     assert not ui.exception and list_vehicles(engine)[0].military_number == "UI-XLSX"
+
+
+def test_independent_draft_navigation_and_cancel_ui(ui, engine, minimum, actor):
+    vehicle = save_vehicle(engine, minimum, actor)
+    ui.run()
+    ui.button(key="open_vehicle").click().run()
+    next(t for t in ui.text_area if t.label == "Текст примітки").set_value("unsaved").run()
+    ui.button(key="back_registry").click().run()
+    assert ui.session_state["page"] == "card" and ui.session_state["pending"]
+    ui.button(key="pending_save").click().run()
+    assert ui.session_state["page"] == "card"
+    ui.button(key="cancel_aux").click().run()
+    ui.button(key="pending_save").click().run()
+    assert not ui.exception and ui.session_state["page"] == "registry"
+    assert get_vehicle(engine, vehicle.id)
+
+
+def test_note_ui_uses_opened_version_and_preserves_conflict_draft(ui, engine, minimum, actor):
+    from auto.records import list_notes, save_note
+
+    vehicle = save_vehicle(engine, minimum, actor)
+    note = save_note(engine, vehicle.id, "original", actor)
+    ui.run()
+    ui.button(key="open_vehicle").click().run()
+    ui.selectbox(key="note_edit").set_value(note.id).run()
+    next(t for t in ui.text_area if t.label == "Текст примітки").set_value("my draft").run()
+    save_note(engine, vehicle.id, "other editor", actor, note_id=note.id, expected_version=1)
+    next(b for b in ui.button if b.label == "Зберегти примітку").click().run()
+    assert not ui.exception and ui.error
+    assert list_notes(engine, vehicle.id, actor)[0].text == "other editor"
+    assert next(t for t in ui.text_area if t.label == "Текст примітки").value == "my draft"
+
+
+def test_editor_reload_preserves_legacy_draft(ui, engine, minimum, actor):
+    save_vehicle(engine, minimum, actor)
+    ui.run()
+    ui.button(key="open_vehicle").click().run()
+    ui.session_state["aux_editors"] = {
+        "legacy": {
+            "version": None,
+            "initial": {"text": ""},
+            "draft": {"text": "unsaved"},
+        }
+    }
+    ui.run()
+    assert not ui.exception
+    assert any("Є незбережені" in warning.value for warning in ui.warning)
+
+
+def test_whole_card_confirmed_save_includes_note_and_equipment(ui, engine, minimum, actor):
+    from auto.records import list_equipment, list_notes
+
+    v = save_vehicle(engine, minimum, actor)
+    ui.run()
+    ui.button(key="open_vehicle").click().run()
+    next(t for t in ui.text_area if t.label == "Текст примітки").set_value("atomic note").run()
+    next(t for t in ui.text_input if t.label == "Назва обладнання").set_value("atomic radio").run()
+    ui.text_input(key="card_color").set_value("Green").run()
+    ui.button(key="save_card").click().run()
+    assert not ui.exception and not list_notes(engine, v.id, actor)
+    assert get_vehicle(engine, v.id).color is None
+    ui.checkbox(key="card_confirmed").check().run()
+    ui.button(key="card_commit").click().run()
+    assert not ui.exception
+    assert list_notes(engine, v.id, actor)[0].text == "atomic note"
+    assert list_equipment(engine, v.id, actor)[0].name == "atomic radio"
+    assert get_vehicle(engine, v.id).color == "Green"

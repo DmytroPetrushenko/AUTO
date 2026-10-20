@@ -3,7 +3,7 @@ import os
 from dataclasses import dataclass
 from enum import StrEnum
 
-from sqlmodel import Session, select
+from sqlmodel import select
 
 from auto.constants import ARCHIVED_STATUSES, normalize
 from auto.models import (
@@ -13,6 +13,7 @@ from auto.models import (
     Vehicle,
     VehicleModel,
 )
+from auto.transactions import Session, begin_write
 
 
 class Role(StrEnum):
@@ -83,7 +84,7 @@ def save_lookup(engine, kind, name, actor, *, entry_id=None, brand_id=None, is_a
         raise BusinessError("Назва довідника обов'язкова, максимум 200 символів")
     model = LOOKUPS[kind]
     with Session(engine) as session:
-        session.connection().exec_driver_sql("BEGIN IMMEDIATE")
+        begin_write(session)
         item = session.get(model, entry_id) if entry_id else None
         if entry_id and item is None:
             raise BusinessError("Запис довідника не знайдено")
@@ -182,13 +183,34 @@ def completeness(vehicle):
         ("manufacture_value", "Дата виготовлення"),
         ("accounting_date", "Дата обліку"),
         ("unit_id", "Підрозділ"),
+        ("mvo_id", "МВО"),
+        ("payload_kg", "Вантажопідйомність"),
+        ("gross_weight_kg", "Повна маса"),
+        ("unloaded_weight_kg", "Маса без навантаження"),
+        ("color", "Колір"),
+        ("vk_code", "Код ВК"),
+        ("nomenclature_number", "Номенклатурний номер"),
+        ("current_location", "Місце перебування"),
     ):
         if getattr(vehicle, field) is None:
             missing.append(label)
     if not vehicle.engine_not_applicable:
-        for field, label in (("engine_type_id", "Тип двигуна"), ("fuel_type_id", "Вид пального")):
+        for field, label in (
+            ("engine_type_id", "Тип двигуна"),
+            ("fuel_type_id", "Вид пального"),
+            ("engine_number", "Номер двигуна"),
+            ("engine_power_kw", "Потужність двигуна"),
+            ("engine_displacement_cm3", "Об'єм двигуна"),
+            ("seats", "Кількість місць"),
+        ):
             if getattr(vehicle, field) is None:
                 missing.append(label)
+    for field, label in (
+        ("technical_condition", "Технічний стан"),
+        ("technical_category", "Категорія"),
+    ):
+        if getattr(vehicle, field) == "Не визначено":
+            missing.append(label)
     return missing
 
 

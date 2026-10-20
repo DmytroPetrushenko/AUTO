@@ -2,9 +2,12 @@ import hashlib
 import math
 from datetime import date, datetime
 from io import BytesIO
+from xml.etree.ElementTree import ParseError
+from zipfile import BadZipFile
 
 from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Font, PatternFill
+from openpyxl.utils.exceptions import InvalidFileException
 from pydantic import ValidationError
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, select
@@ -109,7 +112,7 @@ def export_full(engine, actor, *, vehicles=None, all_records=False):
         raise BusinessError("Явно оберіть вибірку або всі записи")
     lookups = {
         kind: {r.id: r.name for r in list_lookup(engine, kind, active_only=False)}
-        for kind in (*REFERENCE_FIELDS.values(), "engine_types", "fuel_types")
+        for kind in REFERENCE_FIELDS.values()
     }
     with Session(engine) as session:
         people = {
@@ -127,11 +130,7 @@ def export_full(engine, actor, *, vehicles=None, all_records=False):
         row["fuel_type"] = lookups["fuel_types"].get(v.fuel_type_id)
         rows.append(row)
     columns = (
-        list(rows[0])
-        if rows
-        else list(Vehicle.model_fields)
-        + list(REFERENCE_FIELDS)
-        + ["mvo", "engine_type", "fuel_type"]
+        list(rows[0]) if rows else list(Vehicle.model_fields) + list(REFERENCE_FIELDS) + ["mvo"]
     )
     return workbook_bytes(rows, columns)
 
@@ -141,10 +140,25 @@ def export_screen(frame, actor):
     return workbook_bytes(frame.to_dict("records"), list(frame.columns))
 
 
+def _load(content, *, data_only):
+    try:
+        return load_workbook(BytesIO(content), data_only=data_only)
+    except (
+        ValueError,
+        KeyError,
+        TypeError,
+        IndexError,
+        BadZipFile,
+        ParseError,
+        InvalidFileException,
+    ) as exc:
+        raise BusinessError("Пошкоджений або непідтримуваний XLSX") from exc
+
+
 def inspect_workbook(content):
     validate_upload("import.xlsx", content)
-    raw = load_workbook(BytesIO(content), data_only=False)
-    cache = load_workbook(BytesIO(content), data_only=True)
+    raw = _load(content, data_only=False)
+    cache = _load(content, data_only=True)
     result = []
     for sheet in raw:
         formulas = [
@@ -169,7 +183,7 @@ def inspect_workbook(content):
 
 def headers(content, sheet, header_row=1):
     validate_upload("import.xlsx", content)
-    w = load_workbook(BytesIO(content), data_only=False)
+    w = _load(content, data_only=False)
     try:
         if not 1 <= header_row <= 50 or sheet not in w.sheetnames:
             raise BusinessError("Неправильний аркуш або рядок заголовків")
@@ -200,10 +214,13 @@ def _resolve(engine, values):
             matches = [r for r in matches if r.brand_id == data.get("brand_id")]
         if len(matches) != 1:
             raise BusinessError(
-                f"Довідник {HEADERS[field]}: немає однозначного активного значення «{value}»"
+                f"Довідник {HEADERS.get(field, field)}: "
+                f"немає однозначного активного значення «{value}»"
             )
         data[field + "_id"] = matches[0].id
     if values.get("mvo"):
+        if not isinstance(values["mvo"], str):
+            raise BusinessError("МВО має бути текстовим ПІБ")
         with Session(engine) as session:
             matches = [
                 p
@@ -223,7 +240,10 @@ def _resolve(engine, values):
             raise BusinessError(f"{f}: числовий ідентифікатор потребує ручного перегляду")
         if normalize(value) in ("б/н", "бн", "----", "-", "невідомо"):
             raise BusinessError(f"{f}: неоднозначне позначення замість ідентифікатора")
-    if data.get("accounting_status") == "ВИБУЛА":
+    if (
+        isinstance(data.get("accounting_status"), str)
+        and normalize(data["accounting_status"]) == "вибула"
+    ):
         data["accounting_status"] = "Передано"
     return VehicleInput.model_validate(data).model_dump()
 
@@ -245,8 +265,8 @@ def preview_import(
     validate_upload("import.xlsx", content)
     if set(mapping) - set(INPUT_FIELDS):
         raise BusinessError("Невідомі поля мапінгу")
-    raw = load_workbook(BytesIO(content), data_only=False)
-    cache = load_workbook(BytesIO(content), data_only=True)
+    raw = _load(content, data_only=False)
+    cache = _load(content, data_only=True)
     if sheet not in raw.sheetnames or not 1 <= header_row <= 50:
         raise BusinessError("Неправильний аркуш/заголовок")
     s = raw[sheet]

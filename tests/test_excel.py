@@ -7,6 +7,7 @@ from openpyxl import load_workbook
 
 from auto.excel import (
     HEADERS,
+    INPUT_FIELDS,
     apply_import,
     export_full,
     export_screen,
@@ -206,6 +207,37 @@ def test_identifier_free_import_is_idempotent(engine, minimum, actor):
     # An identifier-free row is still idempotent; it never overwrites or silently duplicates.
     again = preview_import(engine, data, mapping, actor)
     assert any("уже імпортований" in error for error in again["rows"][0]["errors"])
+
+
+def test_actual_downloaded_template_import(engine, minimum, actor):
+    w = load_workbook(BytesIO(import_template()))
+    sheet = w.active
+    values = source(engine, minimum) | {"military_number": "0001"}
+    for index, field in enumerate(INPUT_FIELDS, 1):
+        if field in values:
+            sheet.cell(2, index, values[field])
+    output = BytesIO()
+    w.save(output)
+    mapping = {f: str(i) for i, f in enumerate(INPUT_FIELDS, 1)}
+    p = preview_import(engine, output.getvalue(), mapping, actor)
+    assert p["rows"][0]["errors"] == []
+    assert apply_import(engine, p, actor, confirmed=True)[0]["status"] == "created"
+    assert list_vehicles(engine)[0].military_number == "0001"
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        {"engine_type": "unknown"},
+        {"fuel_type": "unknown"},
+        {"mvo": 123},
+        {"accounting_status": 123},
+    ],
+)
+def test_bad_lookup_and_typed_values_are_row_errors(engine, minimum, actor, extra):
+    p = preview_import(engine, *book([source(engine, minimum) | extra]), actor)
+    assert p["rows"][0]["errors"]
+    assert apply_import(engine, p, actor, confirmed=True)[0]["status"] == "skipped"
 
 
 def test_import_receipt_failure_rolls_back_vehicle(engine, minimum, actor):

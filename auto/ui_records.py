@@ -1,3 +1,5 @@
+from datetime import date
+
 import pandas as pd
 import streamlit as st
 
@@ -12,6 +14,7 @@ from auto.records import (
     save_note,
 )
 from auto.services import Role
+from auto.ui_drafts import Editor
 
 
 def panels(engine, actor, tabs):
@@ -41,34 +44,36 @@ def panels(engine, actor, tabs):
             key="doc_edit",
         )
         latest = next((r["revision"].details for r in docs if r["document"].id == chosen), {})
-        with st.form(f"document_{vehicle_id}_{chosen}"):
-            kind = st.text_input(
-                "Тип документа", value=latest.get("kind", ""), disabled=disabled, key="doc_kind"
-            )
-            number = st.text_input(
-                "Номер документа", value=latest.get("number") or "", disabled=disabled
-            )
-            from datetime import date
-
-            day = st.date_input(
-                "Дата документа",
-                value=date.fromisoformat(latest["document_date"])
+        editor = Editor(
+            "document",
+            f"{vehicle_id}_{chosen}",
+            current[chosen].version if chosen else None,
+            {
+                "kind": latest.get("kind", ""),
+                "number": latest.get("number") or "",
+                "document_date": date.fromisoformat(latest["document_date"])
                 if latest.get("document_date")
                 else None,
-                disabled=disabled,
-            )
-            issuer = st.text_input("Видавець", value=latest.get("issuer") or "", disabled=disabled)
-            note = st.text_area(
-                "Примітка до документа", value=latest.get("note") or "", disabled=disabled
-            )
-            uploads = st.file_uploader(
+                "issuer": latest.get("issuer") or "",
+                "note": latest.get("note") or "",
+                "files": [],
+            },
+        )
+        with st.container():
+            kind = editor.widget("text_input", "kind", "Тип документа", disabled=disabled)
+            number = editor.widget("text_input", "number", "Номер документа", disabled=disabled)
+            day = editor.widget("date_input", "document_date", "Дата документа", disabled=disabled)
+            issuer = editor.widget("text_input", "issuer", "Видавець", disabled=disabled)
+            note = editor.widget("text_area", "note", "Примітка до документа", disabled=disabled)
+            uploads = editor.widget(
+                "file_uploader",
+                "files",
                 "Вкладення версії (до 20 МБ кожне)",
                 type=["pdf", "docx", "xlsx", "jpg", "jpeg", "png"],
                 accept_multiple_files=True,
                 disabled=disabled,
-                key="doc_uploads",
             )
-            if st.form_submit_button("Зберегти версію документа", disabled=disabled):
+            if st.button("Зберегти версію документа", disabled=disabled):
                 try:
                     save_document(
                         engine,
@@ -83,8 +88,9 @@ def panels(engine, actor, tabs):
                         [(f.name, f.getvalue()) for f in uploads],
                         actor,
                         document_id=chosen,
-                        expected_version=current[chosen].version if chosen else None,
+                        expected_version=editor.version,
                     )
+                    editor.reset()
                     st.success("Версію збережено")
                     st.rerun()
                 except ui.ERRORS as exc:
@@ -119,26 +125,31 @@ def panels(engine, actor, tabs):
             key="equipment_edit",
         )
         item = next((i for i in all_items if i.id == chosen), None)
-        with st.form(f"equipment_{chosen}_{item.version if item else 0}"):
-            name = st.text_input(
-                "Назва обладнання", value=item.name if item else "", disabled=disabled
+        editor = Editor(
+            "equipment",
+            f"{vehicle_id}_{chosen}",
+            item.version if item else None,
+            {
+                "name": item.name if item else "",
+                "quantity": item.quantity if item else 1.0,
+                "installed_on": item.installed_on if item else None,
+                "is_removed": item.is_removed if item else False,
+                "removed_on": item.removed_on if item else None,
+                "note": item.note or "" if item else "",
+            },
+        )
+        with st.container():
+            name = editor.widget("text_input", "name", "Назва обладнання", disabled=disabled)
+            qty = editor.widget(
+                "number_input", "quantity", "Кількість", min_value=0.01, disabled=disabled
             )
-            qty = st.number_input(
-                "Кількість", min_value=0.01, value=item.quantity if item else 1.0, disabled=disabled
+            installed = editor.widget(
+                "date_input", "installed_on", "Дата встановлення", disabled=disabled
             )
-            installed = st.date_input(
-                "Дата встановлення", value=item.installed_on if item else None, disabled=disabled
-            )
-            removed = st.checkbox(
-                "Зняте", value=item.is_removed if item else False, disabled=disabled
-            )
-            removed_on = st.date_input(
-                "Дата зняття", value=item.removed_on if item else None, disabled=disabled
-            )
-            note = st.text_area(
-                "Примітка до обладнання", value=item.note or "" if item else "", disabled=disabled
-            )
-            if st.form_submit_button("Зберегти обладнання", disabled=disabled):
+            removed = editor.widget("checkbox", "is_removed", "Зняте", disabled=disabled)
+            removed_on = editor.widget("date_input", "removed_on", "Дата зняття", disabled=disabled)
+            note = editor.widget("text_area", "note", "Примітка до обладнання", disabled=disabled)
+            if st.button("Зберегти обладнання", disabled=disabled):
                 try:
                     save_equipment(
                         engine,
@@ -153,8 +164,9 @@ def panels(engine, actor, tabs):
                         ),
                         actor,
                         equipment_id=chosen,
-                        expected_version=item.version if item else None,
+                        expected_version=editor.version,
                     )
+                    editor.reset()
                     st.rerun()
                 except ui.ERRORS as exc:
                     st.error(ui.friendly_error(exc))
@@ -180,17 +192,19 @@ def panels(engine, actor, tabs):
             key="note_edit",
         )
         item = next((n for n in notes if n.id == chosen), None)
-        with st.form(f"note_{chosen}_{item.version if item else 0}"):
-            text = st.text_area(
-                "Текст примітки",
-                value=item.text if item else "",
-                disabled=disabled,
-                key="note_text",
-            )
-            is_hidden = st.checkbox(
-                "Приховати", value=item.is_hidden if item else False, disabled=disabled
-            )
-            if st.form_submit_button("Зберегти примітку", disabled=disabled):
+        editor = Editor(
+            "note",
+            f"{vehicle_id}_{chosen}",
+            item.version if item else None,
+            {
+                "text": item.text if item else "",
+                "is_hidden": item.is_hidden if item else False,
+            },
+        )
+        with st.container():
+            text = editor.widget("text_area", "text", "Текст примітки", disabled=disabled)
+            is_hidden = editor.widget("checkbox", "is_hidden", "Приховати", disabled=disabled)
+            if st.button("Зберегти примітку", disabled=disabled):
                 try:
                     save_note(
                         engine,
@@ -198,9 +212,10 @@ def panels(engine, actor, tabs):
                         text,
                         actor,
                         note_id=chosen,
-                        expected_version=item.version if item else None,
+                        expected_version=editor.version,
                         is_hidden=is_hidden,
                     )
+                    editor.reset()
                     st.rerun()
                 except ui.ERRORS as exc:
                     st.error(ui.friendly_error(exc))

@@ -3,6 +3,7 @@ import json
 import os
 import shutil
 import sqlite3
+from contextlib import closing
 from pathlib import Path
 from uuid import uuid4
 
@@ -21,6 +22,14 @@ def _hash(path):
 def verify_bundle(directory):
     directory = Path(directory).resolve()
     manifest = json.loads((directory / "manifest.json").read_text(encoding="utf-8"))
+    actual = set()
+    for item in directory.rglob("*"):
+        if item.is_symlink() or item.is_junction():
+            raise BusinessError("Посилання у резервній копії заборонені")
+        if item.is_file() and item.name != "manifest.json":
+            actual.add(item.relative_to(directory).as_posix())
+    if actual != set(manifest["files"]):
+        raise BusinessError("Склад резервної копії не відповідає manifest")
     for name, digest in manifest["files"].items():
         path = (directory / name).resolve()
         if directory not in path.parents or not path.is_file() or path.is_symlink():
@@ -30,7 +39,7 @@ def verify_bundle(directory):
     db = (directory / manifest["database"]).resolve()
     if db.parent != directory or manifest["database"] not in manifest["files"]:
         raise BusinessError("Неправильний шлях БД резервної копії")
-    with sqlite3.connect(db) as c:
+    with closing(sqlite3.connect(db)) as c:
         if (
             c.execute("PRAGMA integrity_check").fetchone()[0] != "ok"
             or c.execute("PRAGMA foreign_key_check").fetchall()
@@ -58,7 +67,7 @@ def backup_bundle(database, directory):
     verified_backup(database, directory, attachments)
     files = {}
     for p in directory.rglob("*"):
-        if p.is_symlink():
+        if p.is_symlink() or p.is_junction():
             raise BusinessError("Символічні посилання у вкладеннях заборонені")
         if p.is_file():
             files[p.relative_to(directory).as_posix()] = _hash(p)
@@ -83,6 +92,7 @@ def restore_bundle(directory, database, *, confirmed=False):
     stage.mkdir()
     old_files = []
     installed = []
+    cleanup = True
     try:
         # Always preserve the current installation before replacing it.
         if database.exists():
@@ -107,13 +117,22 @@ def restore_bundle(directory, database, *, confirmed=False):
         os.replace(stage / "new-attachments", database.parent / "attachments")
         installed.append(database.parent / "attachments")
     except Exception:
-        for path in reversed(installed):
-            os.replace(path, stage / ("failed-" + path.name))
-        for old, target in reversed(old_files):
-            os.replace(old, target)
+        try:
+            for path in reversed(installed):
+                os.replace(path, stage / ("failed-" + path.name))
+            for old, target in reversed(old_files):
+                os.replace(old, target)
+        except Exception as rollback_error:
+            cleanup = False
+            raise BusinessError(
+                f"Відкат файлової заміни не завершено. Збережені файли: {stage}. "
+                "Не запускайте AUTO до ручного відновлення перевіреної копії."
+            ) from rollback_error
         raise
     finally:
-        if stage.parent == database.parent and stage.name.startswith(".restore-"):
-            shutil.rmtree(stage)
-        guard.close()
+        try:
+            if cleanup and stage.parent == database.parent and stage.name.startswith(".restore-"):
+                shutil.rmtree(stage)
+        finally:
+            guard.close()
     return database

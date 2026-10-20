@@ -2,11 +2,12 @@ from datetime import date
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
-from sqlmodel import Session, select
+from sqlmodel import select
 
 from auto.history import _digest, today
 from auto.models import FuelNorm, Vehicle, VehicleDocumentLock, VehicleReading
 from auto.services import BusinessError, ConflictError, audit, get_vehicle, require_editor
+from auto.transactions import Session, begin_write
 
 
 class NormInput(BaseModel):
@@ -117,7 +118,7 @@ def save_norm(
 ):
     require_editor(actor)
     with Session(engine) as session:
-        session.connection().exec_driver_sql("BEGIN IMMEDIATE")
+        begin_write(session)
         plan = _norm_plan(session, vehicle_id, data, actor, norm_id, expected_version)
         if not confirmed or preview_token != plan["token"]:
             raise ConflictError("Підтвердіть актуальний перегляд норм")
@@ -178,7 +179,7 @@ def add_reading(engine, vehicle_id, data, actor, *, kind="initial", external_id=
     if kind == "journal" and not external_id:
         raise BusinessError("Запис журналу потребує стабільного зовнішнього ID")
     with Session(engine) as session:
-        session.connection().exec_driver_sql("BEGIN IMMEDIATE")
+        begin_write(session)
         vehicle = session.get(Vehicle, vehicle_id)
         if not vehicle:
             raise BusinessError("Автомобіль не знайдено")

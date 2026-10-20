@@ -3,6 +3,7 @@ import streamlit as st
 
 from auto.accounting import add_reading, current_reading, list_norms, preview_norm, save_norm
 from auto.services import Role, get_vehicle
+from auto.ui_drafts import Editor
 
 
 def panel(engine, actor):
@@ -23,14 +24,31 @@ def panel(engine, actor):
         st.info("Немає показників")
     vehicle = get_vehicle(engine, vid)
     if vehicle.work_unit != "без лічильника":
-        with st.form("initial_reading_" + vid):
-            value = st.number_input(
-                "Початковий показник", min_value=0.0, value=None, disabled=disabled
+        editor = Editor(
+            "reading",
+            vid,
+            None,
+            {
+                "value": None,
+                "day": None,
+                "source": "",
+                "confirmed": False,
+            },
+        )
+        with st.container():
+            value = editor.widget(
+                "number_input", "value", "Початковий показник", min_value=0.0, disabled=disabled
             )
-            day = st.date_input("Дата початкового показника", value=None, disabled=disabled)
-            source = st.text_input("Джерело початкового показника", disabled=disabled)
-            confirmed = st.checkbox("Початковий показник підтверджений", disabled=disabled)
-            if st.form_submit_button("Зберегти початковий показник", disabled=disabled):
+            day = editor.widget(
+                "date_input", "day", "Дата початкового показника", disabled=disabled
+            )
+            source = editor.widget(
+                "text_input", "source", "Джерело початкового показника", disabled=disabled
+            )
+            confirmed = editor.widget(
+                "checkbox", "confirmed", "Початковий показник підтверджений", disabled=disabled
+            )
+            if st.button("Зберегти початковий показник", disabled=disabled):
                 try:
                     add_reading(
                         engine,
@@ -44,6 +62,7 @@ def panel(engine, actor):
                         ),
                         actor,
                     )
+                    editor.reset()
                     st.rerun()
                 except ui.ERRORS as exc:
                     st.error(ui.friendly_error(exc))
@@ -63,28 +82,30 @@ def panel(engine, actor):
         key="norm_edit_" + vid,
     )
     item = ids.get(chosen)
-    prefix = f"norm_{vid}_{chosen}"
-    with st.form(prefix):
-        day = st.date_input(
-            "Початок дії норми", value=item.valid_from if item else None, disabled=disabled
-        )
-        rate = st.number_input(
-            "Базова норма", min_value=0.0, value=item.rate if item else None, disabled=disabled
+    editor = Editor(
+        "norm",
+        f"{vid}_{chosen}",
+        item.version if item else None,
+        {
+            "valid_from": item.valid_from if item else None,
+            "rate": item.rate if item else None,
+            "unit": item.unit if item else "л/100 км",
+            "order_number": item.order_number if item else "",
+            "order_date": item.order_date if item else None,
+        },
+    )
+    with st.container():
+        day = editor.widget("date_input", "valid_from", "Початок дії норми", disabled=disabled)
+        rate = editor.widget(
+            "number_input", "rate", "Базова норма", min_value=0.0, disabled=disabled
         )
         options = ["л/100 км", "л/мотогодину"]
-        unit = st.selectbox(
-            "Одиниця норми",
-            options,
-            index=options.index(item.unit) if item else 0,
-            disabled=disabled,
+        unit = editor.widget(
+            "selectbox", "unit", "Одиниця норми", options=options, disabled=disabled
         )
-        order = st.text_input(
-            "Номер наказу", value=item.order_number if item else "", disabled=disabled
-        )
-        order_day = st.date_input(
-            "Дата наказу", value=item.order_date if item else None, disabled=disabled
-        )
-        if st.form_submit_button("Переглянути норму", disabled=disabled):
+        order = editor.widget("text_input", "order_number", "Номер наказу", disabled=disabled)
+        order_day = editor.widget("date_input", "order_date", "Дата наказу", disabled=disabled)
+        if st.button("Переглянути норму", disabled=disabled):
             try:
                 data = dict(
                     valid_from=day, rate=rate, unit=unit, order_number=order, order_date=order_day
@@ -95,13 +116,13 @@ def panel(engine, actor):
                     data,
                     actor,
                     norm_id=chosen,
-                    expected_version=item.version if item else None,
+                    expected_version=editor.version,
                 )
                 st.session_state["norm_review_" + vid] = (
                     p,
                     data,
                     chosen,
-                    item.version if item else None,
+                    editor.version,
                 )
                 st.session_state["norm_confirm_" + vid] = False
             except ui.ERRORS as exc:
@@ -130,6 +151,9 @@ def panel(engine, actor):
                 )
                 st.session_state.vehicle_version = get_vehicle(engine, vid).version
                 st.session_state.pop("norm_review_" + vid, None)
+                # The reviewed editor may differ from the currently selected norm.
+                reviewed_editor = Editor("norm", f"{vid}_{nid}", version, {})
+                reviewed_editor.reset()
                 st.rerun()
             except ui.ERRORS as exc:
                 st.error(ui.friendly_error(exc))

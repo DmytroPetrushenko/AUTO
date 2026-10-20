@@ -1,6 +1,7 @@
 import os
 import shutil
 import sqlite3
+from contextlib import closing
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -52,14 +53,18 @@ def require_current_schema(engine) -> None:
 def verified_backup(path: Path, target_dir: Path, attachments: Path | None = None) -> Path:
     target_dir.mkdir(parents=True, exist_ok=False)
     target = target_dir / path.name
-    with sqlite3.connect(path) as source, sqlite3.connect(target) as destination:
+    with closing(sqlite3.connect(path)) as source, closing(sqlite3.connect(target)) as destination:
         source.backup(destination)
         if destination.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
             raise RuntimeError("Резервна копія не пройшла integrity_check")
         if destination.execute("PRAGMA foreign_key_check").fetchall():
             raise RuntimeError("Резервна копія містить порушені зовнішні ключі")
     if attachments and attachments.exists():
-        if attachments.is_symlink() or any(p.is_symlink() for p in attachments.rglob("*")):
+        if (
+            attachments.is_symlink()
+            or attachments.is_junction()
+            or any(p.is_symlink() or p.is_junction() for p in attachments.rglob("*"))
+        ):
             raise RuntimeError("Символічні посилання у вкладеннях заборонені")
         shutil.copytree(attachments, target_dir / "attachments")
     return target

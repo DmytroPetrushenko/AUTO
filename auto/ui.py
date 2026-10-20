@@ -84,7 +84,7 @@ LABELS = {
     "nomenclature_number": "Номенклатурний номер",
     "current_location": "Місце перебування",
 }
-ERRORS = (BusinessError, ValidationError, PermissionError, SQLAlchemyError)
+ERRORS = (BusinessError, ValidationError, PermissionError, SQLAlchemyError, OSError)
 
 
 @st.cache_resource
@@ -104,6 +104,9 @@ def widget_key(field):
 
 
 def start_card(engine, vehicle_id=None):
+    from auto.ui_drafts import clear
+
+    clear()
     vehicle = get_vehicle(engine, vehicle_id) if vehicle_id else None
     if vehicle_id and vehicle is None:
         st.session_state.notice = ("error", "Картку не знайдено")
@@ -131,9 +134,12 @@ def start_card(engine, vehicle_id=None):
 
 
 def is_dirty():
+    from auto.ui_drafts import dirty
+
     return (
         st.session_state.get("draft") != st.session_state.get("baseline")
         or st.session_state.get("history_preview") is not None
+        or dirty()
     )
 
 
@@ -170,8 +176,26 @@ TEXT_FIELDS = {
 
 
 def save_current(engine, actor):
+    from auto.ui_drafts import collect, dirty
+
     try:
         day = st.session_state.get("card_event_date")
+        if dirty() and st.session_state.vehicle_id:
+            from auto.card_bundle import preview_bundle
+
+            children = collect(get_vehicle(engine, st.session_state.vehicle_id))
+            bundle = preview_bundle(
+                engine,
+                st.session_state.draft,
+                children,
+                actor,
+                vehicle_id=st.session_state.vehicle_id,
+                expected_version=st.session_state.vehicle_version,
+                event_date=day,
+            )
+            set_review("card_preview", bundle["card"])
+            st.session_state.bundle_review = bundle
+            return False
         plan = preview_vehicle(
             engine,
             st.session_state.draft,
@@ -208,6 +232,27 @@ def save_current(engine, actor):
 def confirm_current(engine, actor):
     try:
         target = st.session_state.pending
+        if bundle := st.session_state.get("bundle_review"):
+            from auto.card_bundle import save_bundle
+            from auto.ui_drafts import collect
+
+            vehicle = save_bundle(
+                engine,
+                st.session_state.draft,
+                collect(get_vehicle(engine, st.session_state.vehicle_id)),
+                actor,
+                vehicle_id=st.session_state.vehicle_id,
+                expected_version=st.session_state.vehicle_version,
+                event_date=st.session_state.get("card_event_date"),
+                preview_token=bundle["token"],
+                confirmed=st.session_state.get("card_confirmed", False),
+                approvals=approval_values("card"),
+            )
+            start_card(engine, vehicle.id)
+            if target:
+                navigate(engine, *target)
+            st.session_state.notice = ("success", "Усю картку збережено однією транзакцією")
+            return
         vehicle = save_vehicle(
             engine,
             st.session_state.draft,
@@ -262,10 +307,13 @@ def request_navigation(engine, page, vehicle_id=None):
 
 
 def resolve_navigation(engine, actor, decision):
+    from auto.ui_drafts import clear
+
     target = st.session_state.pending
     if decision == "stay":
         st.session_state.pending = None
     elif decision == "discard":
+        clear()
         reset_review()
         navigate(engine, *target)
     elif st.session_state.get("history_preview"):
@@ -394,6 +442,13 @@ def card_page(engine, actor):
     )
     actions[2].button(
         "До реєстру", on_click=request_navigation, args=(engine, "registry"), key="back_registry"
+    )
+    from auto.ui_drafts import clear
+
+    st.button("Скасувати окремі форми", on_click=clear, disabled=disabled, key="cancel_aux")
+    st.caption(
+        "«Зберегти» збере зміни всіх форм в одну транзакцію після перегляду. "
+        "Власні кнопки форм зберігають лише відповідний запис."
     )
 
     st.date_input(

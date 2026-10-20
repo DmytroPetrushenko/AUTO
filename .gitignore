@@ -56,3 +56,5 @@ secrets/
 *.p12
 *.log
 .local/
+.auto-running.lock
+.restore-*/

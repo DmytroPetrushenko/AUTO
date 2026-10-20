@@ -33,6 +33,7 @@ def _ui():
 def reset_review():
     st.session_state.card_preview = None
     st.session_state.history_preview = None
+    st.session_state.pop("bundle_review", None)
 
 
 def set_review(key, plan):
@@ -92,6 +93,9 @@ def review_panel(engine, actor, prefix, confirm_callback):
         return
     st.subheader("Перегляд «було → стане»")
     st.caption("Дані ще не записані. Межі періодів зміняться лише після підтвердження.")
+    if prefix == "card" and st.session_state.get("bundle_review"):
+        st.markdown("**Уся картка буде збережена однією транзакцією, включно з окремими формами.**")
+        st.write(st.session_state.bundle_review["operations"])
     changed = set(plan["changed_kinds"])
     left, right = st.columns(2)
     with left:
@@ -346,6 +350,8 @@ def people_panel(engine, actor):
         key="person_edit",
     )
     person = next((p for p in people if p.id == selected), None)
+    snapshots = st.session_state.setdefault("person_snapshots", {})
+    opened = snapshots.setdefault(selected, person.model_dump()) if person else None
     if person:
         with st.expander("Історія змін особи"):
             rows = [
@@ -360,7 +366,7 @@ def people_panel(engine, actor):
             ]
             st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
     disabled = actor.role == Role.VIEWER or (person is not None and actor.role != Role.ADMIN)
-    with st.form(f"person_form_{selected}_{person.version if person else 0}"):
+    with st.form(f"person_form_{selected}_{opened['version'] if opened else 0}"):
         data = {}
         fields = {
             "first_name": "Ім'я",
@@ -373,20 +379,20 @@ def people_panel(engine, actor):
         for field, label in fields.items():
             data[field] = st.text_input(
                 label,
-                value=getattr(person, field) or "" if person else "",
+                value=opened[field] or "" if opened else "",
                 disabled=disabled,
                 key=f"person_{field}_{selected}",
             )
         data["unit_id"] = _reference_select(
             engine,
             "unit_id",
-            person.unit_id if person else None,
+            opened["unit_id"] if opened else None,
             f"person_unit_{selected}",
             disabled=disabled,
         )
         data["is_active"] = st.checkbox(
             "Активна особа",
-            value=person.is_active if person else True,
+            value=opened["is_active"] if opened else True,
             disabled=disabled or actor.role != Role.ADMIN,
         )
         if st.form_submit_button("Зберегти особу" if person else "Додати особу", disabled=disabled):
@@ -396,12 +402,18 @@ def people_panel(engine, actor):
                     PersonInput.model_validate(data),
                     actor,
                     person_id=selected,
-                    expected_version=person.version if person else None,
+                    expected_version=opened["version"] if opened else None,
                 )
+                snapshots.pop(selected, None)
                 st.session_state.notice = ("success", "Персонал збережено")
                 st.rerun()
             except _ui().ERRORS as exc:
                 st.error(_ui().friendly_error(exc))
+    if person and st.button("Перезавантажити збережену особу (скасувати чернетку)"):
+        snapshots.pop(selected, None)
+        for field in (*fields, "unit"):
+            st.session_state.pop(f"person_{field}_{selected}", None)
+        st.rerun()
 
 
 def remove_card(engine, actor):

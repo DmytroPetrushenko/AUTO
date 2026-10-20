@@ -7,7 +7,7 @@ from zipfile import BadZipFile, ZipFile
 
 from PIL import Image
 from pydantic import BaseModel, ConfigDict, Field, model_validator
-from sqlmodel import Session, select
+from sqlmodel import select
 
 from auto.models import (
     DocumentFile,
@@ -20,6 +20,7 @@ from auto.models import (
     utcnow,
 )
 from auto.services import BusinessError, ConflictError, Role, audit, require_editor
+from auto.transactions import Session, begin_write, track_file
 
 MAX_FILE_SIZE = 20 * 1024 * 1024
 
@@ -107,7 +108,7 @@ def save_document(
     written = []
     try:
         with Session(engine) as session:
-            session.connection().exec_driver_sql("BEGIN IMMEDIATE")
+            begin_write(session)
             if not session.get(Vehicle, vehicle_id):
                 raise BusinessError("Автомобіль не знайдено")
             doc = session.get(VehicleDocument, document_id) if document_id else None
@@ -116,6 +117,21 @@ def save_document(
             ):
                 raise ConflictError("Документ уже змінено або не належить картці")
             doc = doc or VehicleDocument(vehicle_id=vehicle_id)
+            previous = (
+                session.exec(
+                    select(DocumentVersion).where(
+                        DocumentVersion.document_id == doc.id,
+                        DocumentVersion.version == doc.version,
+                    )
+                ).first()
+                if document_id
+                else None
+            )
+            old = (
+                {"document_id": doc.id, "version": doc.version, "details": previous.details}
+                if previous
+                else {}
+            )
             if document_id:
                 doc.version += 1
             session.add(doc)
@@ -135,6 +151,7 @@ def save_document(
                 path = root / relative
                 with path.open("xb") as stream:
                     written.append(path)
+                    track_file(path)
                     stream.write(data)
                 session.add(
                     DocumentFile(
@@ -151,7 +168,7 @@ def save_document(
                 "vehicles",
                 vehicle_id,
                 "document_version",
-                {},
+                old,
                 {"document_id": doc.id, "version": doc.version, "details": revision.details},
             )
             session.commit()
@@ -225,7 +242,7 @@ def save_equipment(engine, vehicle_id, data, actor, *, equipment_id=None, expect
     require_editor(actor)
     value = EquipmentInput.model_validate(data)
     with Session(engine) as session:
-        session.connection().exec_driver_sql("BEGIN IMMEDIATE")
+        begin_write(session)
         if not session.get(Vehicle, vehicle_id):
             raise BusinessError("Автомобіль не знайдено")
         item = session.get(VehicleEquipment, equipment_id) if equipment_id else None
@@ -265,7 +282,7 @@ def save_note(
     if not text.strip():
         raise BusinessError("Текст примітки обов’язковий")
     with Session(engine) as session:
-        session.connection().exec_driver_sql("BEGIN IMMEDIATE")
+        begin_write(session)
         if not session.get(Vehicle, vehicle_id):
             raise BusinessError("Автомобіль не знайдено")
         item = session.get(VehicleNote, note_id) if note_id else None

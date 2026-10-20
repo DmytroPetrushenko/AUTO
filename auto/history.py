@@ -8,7 +8,7 @@ from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import delete
-from sqlmodel import Session, select
+from sqlmodel import select
 
 from auto.constants import normalize
 from auto.models import (
@@ -28,6 +28,7 @@ from auto.services import (
     require_editor,
     validate_references,
 )
+from auto.transactions import Session, begin_write
 
 KINDS = {
     "unit": ("unit_id",),
@@ -402,7 +403,7 @@ def save_card(
 ):
     require_editor(actor)
     with Session(engine) as session:
-        session.connection().exec_driver_sql("BEGIN IMMEDIATE")
+        begin_write(session)
         plan = _plan(session, data, actor, vehicle_id, expected_version, event_date, history_edit)
         if plan["blocked_documents"]:
             raise BusinessError(
@@ -519,7 +520,7 @@ def register_document_lock(
     if not reference.strip() or _date(on_date) is None:
         raise BusinessError("Посилання на документ і його дата обов'язкові")
     with Session(engine) as session:
-        session.connection().exec_driver_sql("BEGIN IMMEDIATE")
+        begin_write(session)
         vehicle = session.get(Vehicle, vehicle_id)
         if not vehicle:
             raise BusinessError("Автомобіль не знайдено")
@@ -566,7 +567,7 @@ def delete_vehicle(engine, vehicle_id, actor, *, expected_version, reason, confi
     if not confirmed or not reason.strip():
         raise BusinessError("Для видалення помилкової картки потрібні підтвердження й причина")
     with Session(engine) as session:
-        session.connection().exec_driver_sql("BEGIN IMMEDIATE")
+        begin_write(session)
         vehicle = session.get(Vehicle, vehicle_id)
         if not vehicle or vehicle.version != expected_version:
             raise ConflictError("Картку вже змінено або видалено")
