@@ -73,6 +73,9 @@
 
 ## Документація використаних інструментів
 
+Другий етап розширив схему датованими періодами, персоналом/МВО та погодженнями;
+актуальні правила, межі й перевірки описано в [stage2-status.md](stage2-status.md).
+
 - [SQLModel](https://sqlmodel.tiangolo.com/tutorial/)
 - [Alembic і SQLite](https://alembic.sqlalchemy.org/en/latest/batch.html)
 - [Streamlit AppTest](https://docs.streamlit.io/develop/api-reference/app-testing/st.testing.v1.apptest)

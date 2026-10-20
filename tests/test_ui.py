@@ -175,3 +175,204 @@ def test_service_has_no_default_on_new_card(ui):
     ui.button(key="new_vehicle").click().run()
     assert ui.selectbox(key="card_support_service_id").value is None
     assert ui.selectbox(key="card_work_unit").value is None
+
+
+def test_dated_mvo_requires_preview_and_confirmation(ui, engine, minimum, actor):
+    from datetime import date
+
+    from auto.history import list_history
+    from auto.services import add_person
+
+    person = add_person(engine, "UI", "Responsible", actor)
+    vehicle = save_vehicle(engine, minimum, actor)
+    ui.run()
+    ui.button(key="open_vehicle").click().run()
+    ui.selectbox(key="card_mvo_id").set_value(person.id).run()
+    ui.button(key="save_card").click().run()
+    assert "дата події" in ui.error[0].value
+    assert get_vehicle(engine, vehicle.id).mvo_id is None
+    ui.date_input(key="card_event_date").set_value(date(2025, 1, 1)).run()
+    ui.button(key="save_card").click().run()
+    assert not ui.exception
+    assert get_vehicle(engine, vehicle.id).mvo_id is None
+    ui.button(key="card_commit").click().run()
+    assert "підтвердження" in ui.error[0].value
+    ui.checkbox(key="card_confirmed").check().run()
+    ui.button(key="card_commit").click().run()
+    assert not ui.exception
+    assert get_vehicle(engine, vehicle.id).mvo_id == person.id
+    assert len([r for r in list_history(engine, vehicle.id) if r["kind"] == "mvo"]) == 2
+
+
+def test_military_duplicate_reason_and_confirmation_ui(ui, engine, minimum, actor):
+    save_vehicle(engine, minimum | {"military_number": "SAME"}, actor)
+    at = open_new(ui, minimum)
+    at.text_input(key="card_military_number").set_value(" same ").run()
+    at.button(key="save_card").click().run()
+    assert not at.exception
+    assert len(list_vehicles(engine)) == 1
+    at.checkbox(key="card_confirmed").check().run()
+    at.checkbox(key="card_approve_military_number").check().run()
+    at.button(key="card_commit").click().run()
+    assert "причина" in at.error[0].value
+    at.text_input(key="card_reason_military_number").set_value("Different original cards").run()
+    at.button(key="card_commit").click().run()
+    assert not at.exception
+    assert len(list_vehicles(engine)) == 2
+
+
+def test_physical_duplicate_operator_blocked_admin_approves(
+    ui, engine, minimum, actor, monkeypatch
+):
+    save_vehicle(engine, minimum | {"chassis_number": "FRAME"}, actor)
+    at = open_new(ui, minimum)
+    at.text_input(key="card_chassis_number").set_value("FRAME").run()
+    at.button(key="save_card").click().run()
+    assert at.button(key="card_commit").disabled
+    monkeypatch.setenv("AUTO_ROLE", "admin")
+    at.run()
+    at.button(key="save_card").click().run()
+    assert not at.button(key="card_commit").disabled
+    at.checkbox(key="card_approve_chassis_number").check().run()
+    at.text_input(key="card_reason_chassis_number").set_value("Confirmed archive source").run()
+    at.checkbox(key="card_confirmed").check().run()
+    at.button(key="card_commit").click().run()
+    assert not at.exception
+    assert len(list_vehicles(engine)) == 2
+
+
+def test_history_edit_ui_moves_date_atomically(ui, engine, minimum, actor):
+    from datetime import date
+
+    from auto.history import list_history, preview_vehicle
+
+    vehicle = save_vehicle(engine, minimum, actor)
+    data = minimum | {"military_number": "DATED"}
+    p = preview_vehicle(
+        engine, data, actor, vehicle_id=vehicle.id, expected_version=1, event_date=date(2025, 3, 1)
+    )
+    save_vehicle(
+        engine,
+        data,
+        actor,
+        vehicle_id=vehicle.id,
+        expected_version=1,
+        event_date=date(2025, 3, 1),
+        preview_token=p["token"],
+        confirmed=True,
+    )
+    ui.run()
+    ui.button(key="open_vehicle").click().run()
+    ui.selectbox(key="history_kind").set_value("military_number").run()
+    event = next(
+        r
+        for r in list_history(engine, vehicle.id)
+        if r["kind"] == "military_number" and r["valid_from"] == date(2025, 3, 1)
+    )
+    ui.selectbox(key="history_event_military_number").set_value(event["id"]).run()
+    ui.date_input(key=f"history_date_{event['id']}_2").set_value(date(2025, 2, 1))
+    ui.button(key="history_preview_button").click().run()
+    assert not ui.exception
+    assert get_vehicle(engine, vehicle.id).version == 2
+    ui.checkbox(key="history_confirmed").check().run()
+    ui.button(key="history_commit").click().run()
+    assert not ui.exception
+    rows = [r for r in list_history(engine, vehicle.id) if r["kind"] == "military_number"]
+    assert rows[0]["valid_to"] == rows[1]["valid_from"] == date(2025, 2, 1)
+    assert get_vehicle(engine, vehicle.id).version == 3
+
+
+def test_document_conflict_ui_identifies_reference(ui, engine, minimum, actor):
+    from datetime import date
+
+    from auto.history import register_document_lock
+
+    vehicle = save_vehicle(engine, minimum, actor)
+    register_document_lock(engine, vehicle.id, "UI-WAYBILL-001", date(2025, 6, 1), actor)
+    ui.run()
+    ui.button(key="open_vehicle").click().run()
+    ui.text_input(key="card_military_number").set_value("BLOCKED").run()
+    ui.date_input(key="card_event_date").set_value(date(2025, 1, 1)).run()
+    ui.button(key="save_card").click().run()
+    assert not ui.exception
+    assert ui.button(key="card_commit").disabled
+    assert any("UI-WAYBILL-001" in e.value for e in ui.error)
+    assert get_vehicle(engine, vehicle.id).military_number is None
+
+
+def test_personnel_ui_operator_create_admin_deactivate(ui, engine, monkeypatch):
+    from auto.personnel import list_people
+
+    ui.button(key="nav_dict").click().run()
+    ui.selectbox(key="dictionary_kind").set_value("personnel").run()
+    ui.text_input(key="person_first_name_None").set_value("Test")
+    ui.text_input(key="person_last_name_None").set_value("Responsible")
+    next(b for b in ui.button if b.label == "Додати особу").click().run()
+    assert not ui.exception
+    person = list_people(engine)[0]
+    ui.selectbox(key="person_edit").set_value(person.id).run()
+    assert next(b for b in ui.button if b.label == "Зберегти особу").disabled
+    monkeypatch.setenv("AUTO_ROLE", "admin")
+    ui.run()
+    ui.text_input(key=f"person_last_name_{person.id}").set_value("Renamed")
+    next(c for c in ui.checkbox if c.label == "Активна особа").uncheck()
+    next(b for b in ui.button if b.label == "Зберегти особу").click().run()
+    assert not ui.exception
+    person = list_people(engine)[0]
+    assert person.last_name == "Renamed" and not person.is_active and person.version == 2
+
+
+def test_pending_navigation_waits_for_dated_confirmation(ui, engine, minimum, actor):
+    from datetime import date
+
+    vehicle = save_vehicle(engine, minimum, actor)
+    ui.run()
+    ui.button(key="open_vehicle").click().run()
+    ui.text_input(key="card_military_number").set_value("DATED").run()
+    ui.date_input(key="card_event_date").set_value(date(2025, 1, 1)).run()
+    ui.button(key="back_registry").click().run()
+    ui.button(key="pending_save").click().run()
+    assert get_vehicle(engine, vehicle.id).military_number is None
+    assert ui.session_state["page"] == "card"
+    ui.checkbox(key="card_confirmed").check().run()
+    ui.button(key="card_commit").click().run()
+    assert not ui.exception
+    assert ui.session_state["page"] == "registry"
+    assert get_vehicle(engine, vehicle.id).military_number == "DATED"
+
+
+def test_admin_deletes_erroneous_card_ui(ui, engine, minimum, actor, monkeypatch):
+    vehicle = save_vehicle(engine, minimum, actor)
+    monkeypatch.setenv("AUTO_ROLE", "admin")
+    ui.run()
+    ui.button(key="open_vehicle").click().run()
+    ui.text_input(key="delete_reason").set_value("Erroneous test entry").run()
+    ui.checkbox(key="delete_confirmed").check().run()
+    ui.button(key="delete_card").click().run()
+    assert not ui.exception
+    assert ui.session_state["page"] == "registry"
+    assert get_vehicle(engine, vehicle.id) is None
+
+
+def test_history_preview_navigation_requires_explicit_confirmation(ui, engine, minimum, actor):
+    from datetime import date
+
+    from auto.history import list_history
+
+    vehicle = save_vehicle(engine, minimum, actor)
+    ui.run()
+    ui.button(key="open_vehicle").click().run()
+    ui.selectbox(key="history_kind").set_value("military_number").run()
+    event = next(r for r in list_history(engine, vehicle.id) if r["kind"] == "military_number")
+    ui.date_input(key=f"history_date_{event['id']}_1").set_value(date(2025, 1, 1))
+    ui.text_input(key=f"history_value_military_number_{event['id']}_1").set_value("HISTORY")
+    ui.button(key="history_preview_button").click().run()
+    ui.button(key="back_registry").click().run()
+    ui.button(key="pending_save").click().run()
+    assert ui.session_state["page"] == "card"
+    assert get_vehicle(engine, vehicle.id).military_number is None
+    ui.checkbox(key="history_confirmed").check().run()
+    ui.button(key="history_commit").click().run()
+    assert not ui.exception
+    assert ui.session_state["page"] == "registry"
+    assert get_vehicle(engine, vehicle.id).military_number == "HISTORY"

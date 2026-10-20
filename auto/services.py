@@ -257,12 +257,12 @@ def list_vehicles(engine, *, search="", include_archived=False, incomplete_only=
         ]
 
 
-def list_audit(engine, vehicle_id):
+def list_audit(engine, vehicle_id, *, entity_type="vehicles"):
     with Session(engine) as session:
         return session.exec(
             select(AuditEvent)
             .where(
-                AuditEvent.entity_type == "vehicles",
+                AuditEvent.entity_type == entity_type,
                 AuditEvent.entity_id == vehicle_id,
             )
             .order_by(AuditEvent.recorded_at.desc(), AuditEvent.id.desc())

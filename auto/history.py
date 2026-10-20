@@ -10,9 +10,10 @@ from zoneinfo import ZoneInfo
 from sqlalchemy import delete
 from sqlmodel import Session, select
 
-from auto.constants import ARCHIVED_STATUSES, normalize
+from auto.constants import normalize
 from auto.models import (
     DuplicateApproval,
+    Personnel,
     Vehicle,
     VehicleDocumentLock,
     VehicleHistory,
@@ -187,6 +188,7 @@ def _document_conflicts(session, vehicle_id, after):
         if any(
             values_at(after, row.document_date).get(field) != value
             for field, value in row.snapshot.items()
+            if field in HISTORY_FIELDS
         )
     ]
 
@@ -258,6 +260,17 @@ def _plan(session, data, actor, vehicle_id, expected_version, event_date, histor
                         }
                     )
     after = _periods(after)
+    if old and any(
+        field not in values_at(after, today())
+        for field in (
+            "support_service_id",
+            "accounting_status",
+            "technical_condition",
+            "technical_category",
+            "is_operated",
+        )
+    ):
+        raise BusinessError("Після виправлення відсутній чинний обов'язковий стан на сьогодні")
     duplicates = _duplicates(session, duplicate_values, vehicle_id)
     conflicts = _document_conflicts(session, vehicle_id, after) if old else []
     # Include conflicts and all duplicate cards in the fingerprint, so a changed
@@ -358,6 +371,8 @@ def _write_history(session, vehicle_id, plan, actor):
                 recorded_by=actor.user_id,
                 updated_by=actor.user_id,
             )
+            # Persist the actual stable period ID in audit snapshots too.
+            item["id"] = row.id
         row.valid_from, row.valid_to, row.value = (
             item["valid_from"],
             item["valid_to"],
@@ -504,6 +519,8 @@ def register_document_lock(engine, vehicle_id, reference, on_date, actor):
         snapshot = values_at(_load(session, vehicle_id), _date(on_date))
         if set(snapshot) != HISTORY_FIELDS:
             raise BusinessError("На дату документа немає повного стану; уточніть історію")
+        person = session.get(Personnel, snapshot["mvo_id"]) if snapshot["mvo_id"] else None
+        snapshot["_mvo_person"] = person.model_dump(mode="json") if person else None
         row = VehicleDocumentLock(
             vehicle_id=vehicle_id,
             document_reference=reference,
@@ -535,8 +552,11 @@ def delete_vehicle(engine, vehicle_id, actor, *, expected_version, reason, confi
         vehicle = session.get(Vehicle, vehicle_id)
         if not vehicle or vehicle.version != expected_version:
             raise ConflictError("Картку вже змінено або видалено")
-        if projected_vehicle(session, vehicle).accounting_status in ARCHIVED_STATUSES:
-            raise BusinessError("Передані, списані та втрачені картки не видаляються")
+        if projected_vehicle(session, vehicle).accounting_status in (
+            "Списано",
+            "Втрачено (знищено)",
+        ):
+            raise BusinessError("Списані та втрачені картки не видаляються")
         blockers = []
         if session.exec(
             select(VehicleDocumentLock).where(VehicleDocumentLock.vehicle_id == vehicle_id)

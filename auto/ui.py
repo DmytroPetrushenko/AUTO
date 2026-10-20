@@ -5,7 +5,6 @@ import streamlit as st
 from pydantic import ValidationError
 from pydantic_core import PydanticUndefined
 from sqlalchemy.exc import SQLAlchemyError
-from sqlmodel import Session, select
 
 from auto.constants import (
     ACCOUNTING_STATUSES,
@@ -15,20 +14,29 @@ from auto.constants import (
     WORK_UNITS,
 )
 from auto.db import db_path, make_engine, require_current_schema
-from auto.models import Personnel
+from auto.history import preview_vehicle, today
+from auto.personnel import list_people
 from auto.schemas import VehicleInput
 from auto.services import (
     BusinessError,
     Role,
-    add_person,
     completeness,
     get_vehicle,
-    list_audit,
     list_lookup,
     list_vehicles,
     local_actor,
     save_lookup,
     save_vehicle,
+)
+from auto.ui_history import (
+    approval_values,
+    deletion_panel,
+    history_panel,
+    people_panel,
+    person_label,
+    reset_review,
+    review_panel,
+    set_review,
 )
 
 LOOKUP_LABELS = {
@@ -47,6 +55,7 @@ LABELS = {
     "vehicle_type_id": "Тип техніки",
     "support_service_id": "Служба забезпечення",
     "unit_id": "Підрозділ",
+    "mvo_id": "МВО",
     "military_number": "Військовий номер",
     "vin": "VIN",
     "vin_explanation": "Пояснення VIN",
@@ -108,13 +117,21 @@ def start_card(engine, vehicle_id=None):
             value = value or ""
         st.session_state[widget_key(name)] = value
     st.session_state.page = "card"
+    st.session_state.card_event_date = None
+    st.session_state.delete_reason = ""
+    st.session_state.delete_confirmed = False
+    reset_review()
 
 
 def is_dirty():
-    return st.session_state.get("draft") != st.session_state.get("baseline")
+    return (
+        st.session_state.get("draft") != st.session_state.get("baseline")
+        or st.session_state.get("history_preview") is not None
+    )
 
 
 def change_field(field, engine=None):
+    reset_review()
     value = st.session_state[widget_key(field)]
     if field in TEXT_FIELDS and not value.strip():
         value = None
@@ -147,12 +164,31 @@ TEXT_FIELDS = {
 
 def save_current(engine, actor):
     try:
+        day = st.session_state.get("card_event_date")
+        plan = preview_vehicle(
+            engine,
+            st.session_state.draft,
+            actor,
+            vehicle_id=st.session_state.vehicle_id,
+            expected_version=st.session_state.vehicle_version,
+            event_date=day,
+        )
+        if (
+            (st.session_state.vehicle_id and plan["changed_kinds"])
+            or any(d["approval_required"] for d in plan["duplicates"])
+            or (day is not None and day < today())
+        ):
+            set_review("card_preview", plan)
+            return False
         vehicle = save_vehicle(
             engine,
             st.session_state.draft,
             actor,
             vehicle_id=st.session_state.vehicle_id,
             expected_version=st.session_state.vehicle_version,
+            event_date=day,
+            preview_token=plan["token"],
+            confirmed=True,
         )
     except ERRORS as exc:
         st.session_state.notice = ("error", friendly_error(exc))
@@ -160,6 +196,28 @@ def save_current(engine, actor):
     start_card(engine, vehicle.id)
     st.session_state.notice = ("success", "Картку збережено")
     return True
+
+
+def confirm_current(engine, actor):
+    try:
+        target = st.session_state.pending
+        vehicle = save_vehicle(
+            engine,
+            st.session_state.draft,
+            actor,
+            vehicle_id=st.session_state.vehicle_id,
+            expected_version=st.session_state.vehicle_version,
+            event_date=st.session_state.get("card_event_date"),
+            preview_token=st.session_state.card_preview["token"],
+            confirmed=st.session_state.get("card_confirmed", False),
+            approvals=approval_values("card"),
+        )
+        start_card(engine, vehicle.id)
+        if target:
+            navigate(engine, *target)
+        st.session_state.notice = ("success", "Картку та історію збережено")
+    except ERRORS as exc:
+        st.session_state.notice = ("error", friendly_error(exc))
 
 
 def friendly_error(exc):
@@ -193,7 +251,10 @@ def resolve_navigation(engine, actor, decision):
     if decision == "stay":
         st.session_state.pending = None
     elif decision == "discard":
+        reset_review()
         navigate(engine, *target)
+    elif st.session_state.get("history_preview"):
+        st.session_state.notice = ("info", "Підтвердьте перегляд виправлення історії нижче")
     elif save_current(engine, actor):
         navigate(engine, *target)
 
@@ -320,6 +381,19 @@ def card_page(engine, actor):
         "До реєстру", on_click=request_navigation, args=(engine, "registry"), key="back_registry"
     )
 
+    st.date_input(
+        "Дата події для змін підрозділу, МВО, служби, статусу та ID",
+        value=None,
+        key="card_event_date",
+        on_change=reset_review,
+        disabled=disabled,
+    )
+    st.caption(
+        "Для початкової картки дату можна залишити невідомою. "
+        "Для змін датованих полів укажіть фактичну дату."
+    )
+    review_panel(engine, actor, "card", confirm_current)
+    deletion_panel(engine, actor)
     tabs = st.tabs(
         ["Основне", "Технічні дані", "Облік", "Історія", "Документи", "Обладнання", "Примітки"]
     )
@@ -342,7 +416,7 @@ def card_page(engine, actor):
             "serial_number",
         ):
             text_field(field, disabled)
-        st.caption("Нестандартний VIN допускається з поясненням. Повтори ID поки блокуються.")
+        st.caption("Нестандартний VIN допускається з поясненням. Повтори ID потребують погодження.")
     with tabs[1]:
         st.subheader("Технічні дані")
         for field, options in (
@@ -386,6 +460,23 @@ def card_page(engine, actor):
         text_field("color", disabled)
     with tabs[2]:
         st.subheader("Облік")
+        people = list_people(engine)
+        selected = st.session_state.draft["mvo_id"]
+        names = {
+            p.id: person_label(p) + (" (неактивний)" if not p.is_active else "")
+            for p in people
+            if p.is_active or p.id == selected
+        }
+        st.selectbox(
+            "МВО",
+            list(names),
+            index=None,
+            format_func=lambda x: names.get(x, "—"),
+            key=widget_key("mvo_id"),
+            on_change=change_field,
+            args=("mvo_id",),
+            disabled=disabled,
+        )
         select_field("accounting_status", ACCOUNTING_STATUSES, disabled)
         st.checkbox(
             LABELS["is_operated"],
@@ -404,35 +495,13 @@ def card_page(engine, actor):
         )
         for field in ("vk_code", "nomenclature_number", "current_location"):
             text_field(field, disabled)
-        st.info(
-            "Немає показників. Початкові показники, журнал пробігу, МВО та норми — наступний етап."
-        )
+        st.info("Немає показників. Початкові показники, журнал пробігу та норми — наступний етап.")
         if st.session_state.vehicle_id:
             missing = completeness(get_vehicle(engine, st.session_state.vehicle_id))
             if missing:
                 st.warning("Неповні дані збереженої картки: " + ", ".join(missing))
     with tabs[3]:
-        st.subheader("Історія змін")
-        records = []
-        if st.session_state.vehicle_id:
-            for event in list_audit(engine, st.session_state.vehicle_id):
-                for field, value in event.new_values.items():
-                    if event.old_values.get(field) != value:
-                        records.append(
-                            {
-                                "Час UTC": event.recorded_at.isoformat(),
-                                "Автор": event.user_id,
-                                "Дія": event.action,
-                                "Поле": LABELS.get(field, field),
-                                "Було": str(event.old_values.get(field, "")),
-                                "Стало": "" if value is None else str(value),
-                            }
-                        )
-        if records:
-            st.dataframe(pd.DataFrame(records), hide_index=True, width="stretch")
-        else:
-            st.info("Історія з'явиться після збереження картки.")
-        st.caption("Датовані періоди та узгодження заднім числом — наступний етап.")
+        history_panel(engine, actor)
     for tab, name in zip(tabs[4:], ("Документи", "Обладнання", "Примітки"), strict=True):
         with tab:
             st.subheader(name)
@@ -462,7 +531,9 @@ def registry_page(engine, actor):
         disabled=actor.role == Role.VIEWER,
         key="new_vehicle",
     )
-    search = st.text_input("Пошук за номером, VIN, шасі, маркою або моделлю", key="registry_search")
+    search = st.text_input(
+        "Пошук за номером, VIN, шасі, маркою, моделлю або МВО", key="registry_search"
+    )
     filters = {}
     with st.expander("Фільтри", expanded=True):
         cols = st.columns(3)
@@ -502,6 +573,7 @@ def registry_page(engine, actor):
             "units",
         )
     }
+    people_names = {p.id: person_label(p) for p in list_people(engine)}
     rows = [
         {
             "ID": v.id,
@@ -512,6 +584,7 @@ def registry_page(engine, actor):
             "Тип": names["vehicle_types"][v.vehicle_type_id],
             "Служба": names["support_services"][v.support_service_id],
             "Підрозділ": names["units"].get(v.unit_id, ""),
+            "МВО": people_names.get(v.mvo_id, ""),
             "Обліковий статус": v.accounting_status,
             "Технічний стан": v.technical_condition,
             "Категорія": v.technical_category,
@@ -562,35 +635,7 @@ def dictionaries_page(engine, actor):
     )
     disabled = actor.role == Role.VIEWER
     if kind == "personnel":
-        with Session(engine) as session:
-            people = session.exec(select(Personnel)).all()
-        if people:
-            st.dataframe(pd.DataFrame([p.model_dump() for p in people]), hide_index=True)
-        with st.form("personnel_add", clear_on_submit=True):
-            first = st.text_input("Ім'я", disabled=disabled)
-            last = st.text_input("Прізвище", disabled=disabled)
-            patronymic = st.text_input("По батькові", disabled=disabled)
-            rank = st.text_input("Звання", disabled=disabled)
-            position = st.text_input("Посада", disabled=disabled)
-            number = st.text_input("Особистий номер", disabled=disabled)
-            unit_id = filter_lookup(engine, "units", "Підрозділ", "personnel_unit")
-            if st.form_submit_button("Додати особу", disabled=disabled):
-                try:
-                    add_person(
-                        engine,
-                        first,
-                        last,
-                        actor,
-                        patronymic=patronymic or None,
-                        rank=rank or None,
-                        position=position or None,
-                        personal_number=number or None,
-                        unit_id=unit_id,
-                    )
-                    st.session_state.notice = ("success", "Особу додано")
-                    st.rerun()
-                except ERRORS as exc:
-                    st.error(friendly_error(exc))
+        people_panel(engine, actor)
         return
     brand_id = None
     if kind == "vehicle_models":

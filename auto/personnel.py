@@ -17,6 +17,11 @@ class PersonInput(BaseModel):
     personal_number: str | None = None
     is_active: bool = True
 
+    @field_validator("patronymic", "rank", "position", "personal_number", mode="before")
+    @classmethod
+    def optional_empty(cls, value):
+        return None if isinstance(value, str) and not value.strip() else value
+
     @field_validator("first_name", "last_name")
     @classmethod
     def required_name(cls, value):

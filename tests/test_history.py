@@ -63,6 +63,8 @@ def test_initial_unknown_dates_and_audit(engine, minimum, actor):
     assert len(rows) == len(KINDS)
     assert all(r["valid_from"] is None and r["valid_to"] is None for r in rows)
     assert any(a.action == "periods_reconciled" for a in list_audit(engine, vehicle.id))
+    recorded = next(a for a in list_audit(engine, vehicle.id) if a.action == "periods_reconciled")
+    assert {r["id"] for r in recorded.new_values["periods"]} == {r["id"] for r in rows}
 
 
 def test_backdated_preview_splits_without_changing_later_assignment(engine, minimum, actor):
@@ -387,3 +389,50 @@ def test_duplicate_approval_tables_are_immutable(engine, minimum, actor):
     with Session(engine) as session:
         assert len(session.exec(select(DuplicateApproval)).all()) == 1
         assert len(session.exec(select(Vehicle)).all()) == 2
+
+
+def test_applied_document_preserves_mvo_name_snapshot(engine, minimum, actor):
+    person = add_person(engine, "Original", "Name", actor)
+    vehicle = save_vehicle(engine, minimum | {"mvo_id": person.id}, actor)
+    register_document_lock(engine, vehicle.id, "MVO-SNAPSHOT", D1, actor)
+    save_person(
+        engine,
+        {"first_name": "Renamed", "last_name": "Name"},
+        ADMIN,
+        person_id=person.id,
+        expected_version=1,
+    )
+    with Session(engine) as session:
+        snapshot = session.exec(select(VehicleDocumentLock)).first().snapshot
+        assert snapshot["_mvo_person"]["first_name"] == "Original"
+    # Renaming a reference does not silently rewrite document snapshots.
+    change(engine, vehicle, actor, {"color": "Green"}, None)
+
+
+def test_cannot_move_only_required_state_to_future(engine, minimum, actor):
+    vehicle = save_vehicle(engine, minimum, actor)
+    event = next(r for r in list_history(engine, vehicle.id) if r["kind"] == "service")
+    with pytest.raises(BusinessError, match="чинний обов'язковий"):
+        preview_history(
+            engine, vehicle.id, event["id"], event["value"], today() + timedelta(days=1), actor, 1
+        )
+
+
+def test_document_lock_rejects_tampering(engine, minimum, actor):
+    from sqlalchemy.exc import IntegrityError
+
+    vehicle = save_vehicle(engine, minimum, actor)
+    register_document_lock(engine, vehicle.id, "IMMUTABLE-LOCK", D1, actor)
+    with engine.begin() as connection:
+        with pytest.raises(IntegrityError, match="immutable"):
+            connection.exec_driver_sql(
+                "UPDATE vehicle_document_locks SET document_reference='tampered'"
+            )
+
+
+def test_erroneous_transferred_card_without_records_can_be_deleted(engine, minimum, actor):
+    vehicle = save_vehicle(engine, minimum | {"accounting_status": "Передано"}, actor)
+    delete_vehicle(
+        engine, vehicle.id, ADMIN, expected_version=1, reason="Erroneous entry", confirmed=True
+    )
+    assert get_vehicle(engine, vehicle.id) is None
