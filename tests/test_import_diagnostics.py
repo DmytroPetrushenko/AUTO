@@ -1,7 +1,12 @@
+import pytest
+from sqlmodel import Session, select
 from test_excel import book, source
 
+from auto import excel
 from auto.excel import apply_import, preview_import
-from auto.services import list_vehicles, save_vehicle
+from auto.models import AuditEvent, ImportBatch, ImportReceipt, VehicleHistory
+from auto.services import list_lookup, list_vehicles, save_lookup, save_vehicle
+from auto.transactions import atomic
 
 
 def test_all_row_errors_include_numeric_identifier_and_unsupported_condition(
@@ -75,3 +80,51 @@ def test_numeric_identifier_never_silently_matches_text_until_reviewed(engine, m
         engine, content, mapping, actor, overrides={"2": {"chassis_number": "00123"}}
     )
     assert p["rows"][0]["duplicates"][0]["matches"][0]["vehicle_id"] == v.id
+
+
+def test_import_joins_outer_transaction_and_rolls_back_cards_receipts_and_lookups(
+    engine, minimum, actor, monkeypatch
+):
+    content, mapping = book(
+        [source(engine, minimum) | {"military_number": number} for number in ("ONE", "TWO")]
+    )
+    preview = preview_import(engine, content, mapping, actor)
+    with Session(engine) as session:
+        audit_before = len(session.exec(select(AuditEvent)).all())
+    original_save = excel.save_vehicle
+    calls = []
+
+    def fail_second(*args, **kwargs):
+        calls.append(True)
+        if len(calls) == 2:
+            raise RuntimeError("interrupted import")
+        return original_save(*args, **kwargs)
+
+    monkeypatch.setattr(excel, "save_vehicle", fail_second)
+    with pytest.raises(RuntimeError, match="interrupted import"), atomic(engine):
+        save_lookup(engine, "vehicle_brands", "Rollback-only brand", actor)
+        apply_import(engine, preview, actor, confirmed=True)
+    assert len(calls) == 2
+    assert not list_vehicles(engine, include_archived=True)
+    assert not any(x.name == "Rollback-only brand" for x in list_lookup(engine, "vehicle_brands"))
+    with Session(engine) as session:
+        for model in (ImportBatch, ImportReceipt, VehicleHistory):
+            assert not session.exec(select(model)).all()
+        assert len(session.exec(select(AuditEvent)).all()) == audit_before
+
+
+def test_import_commits_all_cards_and_log_in_outer_transaction(engine, minimum, actor):
+    content, mapping = book(
+        [source(engine, minimum) | {"military_number": number} for number in ("ONE", "TWO")]
+    )
+    with atomic(engine):
+        preview = preview_import(engine, content, mapping, actor)
+        results = apply_import(engine, preview, actor, confirmed=True)
+        assert [r["status"] for r in results] == ["created", "created"]
+    assert len(list_vehicles(engine, include_archived=True)) == 2
+    with Session(engine) as session:
+        batches = session.exec(select(ImportBatch)).all()
+        assert len(batches) == 1 and len(batches[0].results) == 2
+        assert len(session.exec(select(ImportReceipt)).all()) == 2
+        history = session.exec(select(VehicleHistory)).all()
+        assert history and all(row.valid_from is None for row in history)

@@ -10,7 +10,7 @@ from openpyxl.styles import Font, PatternFill
 from openpyxl.utils.exceptions import InvalidFileException
 from pydantic import ValidationError
 from sqlalchemy.exc import IntegrityError
-from sqlmodel import Session, select
+from sqlmodel import select
 
 from auto.constants import normalize
 from auto.history import IDENTIFIERS, _digest, duplicate_matches, preview_vehicle
@@ -25,6 +25,7 @@ from auto.services import (
     require_editor,
     save_vehicle,
 )
+from auto.transactions import Session
 
 REFERENCE_FIELDS = {
     "brand": "vehicle_brands",
