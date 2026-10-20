@@ -330,3 +330,51 @@ class NoteVersion(Base, table=True):
     is_hidden: bool
     created_at: datetime = Field(default_factory=utcnow)
     created_by: str
+
+
+class FuelNorm(Base, table=True):
+    __tablename__ = "vehicle_fuel_norms"
+    __table_args__ = (UniqueConstraint("vehicle_id", "valid_from"),)
+    id: str = Field(default_factory=lambda: str(uuid4()), primary_key=True)
+    vehicle_id: str = Field(foreign_key="vehicles.id", index=True)
+    valid_from: date = Field(index=True)
+    valid_to: date | None = None
+    rate: float
+    unit: str
+    order_number: str
+    order_date: date
+    version: int = 1
+
+
+class VehicleReading(Base, table=True):
+    __tablename__ = "vehicle_readings"
+    __table_args__ = (
+        Index(
+            "ix_initial_reading_once",
+            "vehicle_id",
+            "unit",
+            unique=True,
+            sqlite_where=text("kind='initial'"),
+        ),
+    )
+    id: str = Field(default_factory=lambda: str(uuid4()), primary_key=True)
+    vehicle_id: str = Field(foreign_key="vehicles.id", index=True)
+    kind: str
+    value: float
+    unit: str
+    measured_on: date = Field(index=True)
+    source: str
+    confirmed: bool = False
+    external_id: str | None = Field(default=None, unique=True)
+    recorded_at: datetime = Field(default_factory=utcnow)
+    recorded_by: str
+
+
+class FilterPreset(Base, table=True):
+    __tablename__ = "filter_presets"
+    __table_args__ = (UniqueConstraint("user_id", "normalized_name"),)
+    id: int | None = Field(default=None, primary_key=True)
+    user_id: str = Field(index=True)
+    name: str
+    normalized_name: str
+    settings: dict = Field(sa_column=Column(JSON, nullable=False))

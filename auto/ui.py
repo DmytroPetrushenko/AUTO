@@ -239,7 +239,15 @@ def friendly_error(exc):
 
 
 def navigate(engine, page, vehicle_id=None):
-    if page == "card":
+    if page == "clone":
+        from auto.registry import clone_draft
+
+        data = clone_draft(engine, vehicle_id, local_actor())
+        start_card(engine)
+        st.session_state.draft = data
+        for name, value in data.items():
+            st.session_state[widget_key(name)] = (value or "") if name in TEXT_FIELDS else value
+    elif page == "card":
         start_card(engine, vehicle_id)
     else:
         st.session_state.page = page
@@ -401,6 +409,14 @@ def card_page(engine, actor):
     )
     review_panel(engine, actor, "card", confirm_current)
     deletion_panel(engine, actor)
+    if st.session_state.vehicle_id:
+        st.button(
+            "Створити на основі",
+            key="clone_vehicle",
+            disabled=disabled,
+            on_click=request_navigation,
+            args=(engine, "clone", st.session_state.vehicle_id),
+        )
     tabs = st.tabs(
         ["Основне", "Технічні дані", "Облік", "Історія", "Документи", "Обладнання", "Примітки"]
     )
@@ -502,7 +518,9 @@ def card_page(engine, actor):
         )
         for field in ("vk_code", "nomenclature_number", "current_location"):
             text_field(field, disabled)
-        st.info("Немає показників. Початкові показники, журнал пробігу та норми — наступний етап.")
+        from auto.ui_accounting import panel
+
+        panel(engine, actor)
         if st.session_state.vehicle_id:
             missing = completeness(get_vehicle(engine, st.session_state.vehicle_id))
             if missing:
@@ -540,6 +558,9 @@ def registry_page(engine, actor):
     search = st.text_input(
         "Пошук за номером, VIN, шасі, маркою, моделлю або МВО", key="registry_search"
     )
+    from auto.ui_presets import controls
+
+    controls(engine, actor)
     filters = {}
     with st.expander("Фільтри", expanded=True):
         cols = st.columns(3)
@@ -562,7 +583,19 @@ def registry_page(engine, actor):
                 filters[field] = st.selectbox(
                     LABELS[field], options, index=None, key=f"filter_{field}", placeholder="Усі"
                 )
-        operated = st.selectbox("Експлуатація", ("Усі", "Експлуатується", "Не експлуатується"))
+        people = list_people(engine)
+        people_map = {p.id: person_label(p) for p in people}
+        filters["mvo_id"] = st.selectbox(
+            "МВО",
+            list(people_map),
+            index=None,
+            format_func=people_map.get,
+            key="filter_mvo_id",
+            placeholder="Усі",
+        )
+        operated = st.selectbox(
+            "Експлуатація", ("Усі", "Експлуатується", "Не експлуатується"), key="registry_operated"
+        )
         filters["is_operated"] = None if operated == "Усі" else operated == "Експлуатується"
         archived = st.checkbox("Показати архівні", key="include_archived")
         incomplete = st.checkbox("Неповні дані", key="incomplete_only")
@@ -612,9 +645,11 @@ def registry_page(engine, actor):
         "Обліковий статус",
         "Технічний стан",
     ]
-    columns = st.multiselect("Колонки реєстру", list(frame.columns), default=defaults)
-    sort_by = st.selectbox("Сортування", list(frame.columns), index=2)
-    reverse = st.checkbox("За спаданням")
+    columns = st.multiselect(
+        "Колонки реєстру", list(frame.columns), default=defaults, key="registry_columns"
+    )
+    sort_by = st.selectbox("Сортування", list(frame.columns), index=2, key="registry_sort")
+    reverse = st.checkbox("За спаданням", key="registry_reverse")
     frame = frame.sort_values(sort_by, ascending=not reverse, kind="stable")
     st.dataframe(frame[columns], hide_index=True, width="stretch")
     display = {

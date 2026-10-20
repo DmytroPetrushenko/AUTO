@@ -3,7 +3,7 @@ from pathlib import Path
 import pytest
 from streamlit.testing.v1 import AppTest
 
-from auto.services import get_vehicle, list_vehicles, save_vehicle
+from auto.services import Actor, Role, get_vehicle, list_vehicles, save_vehicle
 
 
 @pytest.fixture
@@ -394,3 +394,45 @@ def test_notes_equipment_and_document_download_ui(ui, engine, minimum, actor):
     next(b for b in ui.button if b.label == "Зберегти обладнання").click().run()
     assert not ui.exception
     assert list_equipment(engine, vehicle.id, actor)[0].name == "UI Radio"
+
+
+def test_accounting_norm_and_clone_ui(ui, engine, minimum, actor):
+    from datetime import date
+
+    from auto.accounting import list_norms
+
+    vehicle = save_vehicle(engine, minimum | {"military_number": "ORIGINAL"}, actor)
+    ui.run()
+    ui.button(key="open_vehicle").click().run()
+    next(x for x in ui.date_input if x.label == "Початок дії норми").set_value(date(2025, 1, 1))
+    next(x for x in ui.number_input if x.label == "Базова норма").set_value(10.0)
+    next(x for x in ui.text_input if x.label == "Номер наказу").set_value("1")
+    next(x for x in ui.date_input if x.label == "Дата наказу").set_value(date(2025, 1, 1))
+    next(b for b in ui.button if b.label == "Переглянути норму").click().run()
+    assert not ui.exception
+    assert list_norms(engine, vehicle.id) == []
+    ui.checkbox(key="norm_confirm_" + vehicle.id).check().run()
+    next(b for b in ui.button if b.label == "Підтвердити норму").click().run()
+    assert not ui.exception
+    assert list_norms(engine, vehicle.id)[0].rate == 10
+    ui.button(key="clone_vehicle").click().run()
+    assert not ui.exception
+    assert ui.text_input(key="card_military_number").value == ""
+    assert ui.session_state["vehicle_id"] is None
+
+
+def test_personal_filter_ui(ui, engine, minimum, actor):
+    from auto.registry import list_presets
+
+    save_vehicle(engine, minimum, actor)
+    ui.run()
+    ui.text_input(key="registry_search").set_value("test").run()
+    ui.text_input(key="preset_name").set_value("My view").run()
+    next(b for b in ui.button if b.label == "Зберегти поточний набір").click().run()
+    assert not ui.exception
+    saved = list_presets(engine, Actor("ui-test", Role.OPERATOR))[0]
+    ui.text_input(key="registry_search").set_value("").run()
+    ui.selectbox(key="preset_selected").set_value(saved.id).run()
+    next(b for b in ui.button if b.label == "Застосувати набір").click().run()
+    assert not ui.exception
+    assert ui.text_input(key="registry_search").value == "test"

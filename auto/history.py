@@ -506,7 +506,9 @@ def apply_history(
     )
 
 
-def register_document_lock(engine, vehicle_id, reference, on_date, actor):
+def register_document_lock(
+    engine, vehicle_id, reference, on_date, actor, *, adjustment_percent=-15
+):
     """Called only when an external module applies a document, never by the current UI."""
     require_editor(actor)
     if not reference.strip() or _date(on_date) is None:
@@ -521,6 +523,17 @@ def register_document_lock(engine, vehicle_id, reference, on_date, actor):
             raise BusinessError("На дату документа немає повного стану; уточніть історію")
         person = session.get(Personnel, snapshot["mvo_id"]) if snapshot["mvo_id"] else None
         snapshot["_mvo_person"] = person.model_dump(mode="json") if person else None
+        import math
+
+        from auto.accounting import current_reading, norm_at
+
+        if not math.isfinite(adjustment_percent) or adjustment_percent < -100:
+            raise BusinessError("Неправильне коригування дорожнього листа")
+        norm = norm_at(engine, vehicle_id, _date(on_date))
+        snapshot["_fuel_norm"] = json.loads(json.dumps(norm, default=str))
+        snapshot["_fuel_adjustment_percent"] = adjustment_percent
+        reading = current_reading(engine, vehicle_id, _date(on_date))
+        snapshot["_reading"] = reading.model_dump(mode="json") if reading else None
         row = VehicleDocumentLock(
             vehicle_id=vehicle_id,
             document_reference=reference,
@@ -558,12 +571,20 @@ def delete_vehicle(engine, vehicle_id, actor, *, expected_version, reason, confi
         ):
             raise BusinessError("Списані та втрачені картки не видаляються")
         blockers = []
-        from auto.models import VehicleDocument, VehicleEquipment, VehicleNote
+        from auto.models import (
+            FuelNorm,
+            VehicleDocument,
+            VehicleEquipment,
+            VehicleNote,
+            VehicleReading,
+        )
 
         for model, label in (
             (VehicleDocument, "документи з вкладеннями"),
             (VehicleEquipment, "обладнання"),
             (VehicleNote, "примітки"),
+            (FuelNorm, "норми пального"),
+            (VehicleReading, "показники журналу/початкові"),
         ):
             if session.exec(select(model).where(model.vehicle_id == vehicle_id)).first():
                 blockers.append(label)
