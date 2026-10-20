@@ -5,11 +5,11 @@ from alembic import command
 from alembic.autogenerate import compare_metadata
 from alembic.runtime.migration import MigrationContext
 from sqlalchemy.exc import IntegrityError
-from sqlmodel import Session, SQLModel, select
+from sqlmodel import Session, select
 
 from auto.constants import VEHICLE_TYPES
 from auto.db import alembic_config, make_engine, migrate, verified_backup
-from auto.models import Vehicle, VehicleBrand
+from auto.models import Base, Vehicle, VehicleBrand
 from auto.services import list_lookup, save_vehicle
 
 
@@ -18,7 +18,7 @@ def test_migration_idempotent_and_schema_matches(engine):
         assert connection.exec_driver_sql("PRAGMA foreign_keys").scalar() == 1
         assert connection.exec_driver_sql("PRAGMA foreign_key_check").fetchall() == []
         assert connection.exec_driver_sql("PRAGMA integrity_check").scalar() == "ok"
-        assert compare_metadata(MigrationContext.configure(connection), SQLModel.metadata) == []
+        assert compare_metadata(MigrationContext.configure(connection), Base.metadata) == []
     assert set(x.name for x in list_lookup(engine, "vehicle_types")) == set(VEHICLE_TYPES)
     assert set(x.name for x in list_lookup(engine, "support_services")) == {"СВТ", "ЕТС"}
     assert list_lookup(engine, "vehicle_brands") == []

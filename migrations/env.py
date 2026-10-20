@@ -1,9 +1,9 @@
 from alembic import context
 
-from auto.models import SQLModel
+from auto.models import Base
 
 config = context.config
-target_metadata = SQLModel.metadata
+target_metadata = Base.metadata
 
 
 def run_migrations():

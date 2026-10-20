@@ -10,14 +10,19 @@ from sqlalchemy import (
     UniqueConstraint,
     text,
 )
+from sqlalchemy.orm import registry
 from sqlmodel import Field, SQLModel
+
+
+class Base(SQLModel, registry=registry()):
+    """Own mappings/metadata per module load, including Streamlit source reloads."""
 
 
 def utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
-class LookupBase(SQLModel):
+class LookupBase(Base):
     id: int | None = Field(default=None, primary_key=True)
     name: str = Field(max_length=200)
     normalized_name: str = Field(max_length=200, index=True)
@@ -64,7 +69,7 @@ class Unit(LookupBase, table=True):
     __table_args__ = (UniqueConstraint("normalized_name"),)
 
 
-class Personnel(SQLModel, table=True):
+class Personnel(Base, table=True):
     __tablename__ = "personnel"
     id: int | None = Field(default=None, primary_key=True)
     first_name: str
@@ -79,7 +84,7 @@ class Personnel(SQLModel, table=True):
     version: int = 1
 
 
-class Vehicle(SQLModel, table=True):
+class Vehicle(Base, table=True):
     __tablename__ = "vehicles"
     __table_args__ = (
         ForeignKeyConstraint(
@@ -171,7 +176,7 @@ class Vehicle(SQLModel, table=True):
     version: int = 1
 
 
-class AuditEvent(SQLModel, table=True):
+class AuditEvent(Base, table=True):
     """No FK to vehicles: audit survives a future authorized deletion."""
 
     __tablename__ = "audit_events"
@@ -186,7 +191,7 @@ class AuditEvent(SQLModel, table=True):
     new_values: dict = Field(default_factory=dict, sa_column=Column(JSON, nullable=False))
 
 
-class VehicleHistory(SQLModel, table=True):
+class VehicleHistory(Base, table=True):
     """Typed timelines; NULL valid_from means the actual start is unknown."""
 
     __tablename__ = "vehicle_history"
@@ -225,7 +230,7 @@ class VehicleHistory(SQLModel, table=True):
     is_initial: bool = False
 
 
-class DuplicateApproval(SQLModel, table=True):
+class DuplicateApproval(Base, table=True):
     __tablename__ = "duplicate_approvals"
     id: int | None = Field(default=None, primary_key=True)
     vehicle_id: str = Field(foreign_key="vehicles.id", index=True)
@@ -238,7 +243,7 @@ class DuplicateApproval(SQLModel, table=True):
     approved_at: datetime = Field(default_factory=utcnow)
 
 
-class VehicleDocumentLock(SQLModel, table=True):
+class VehicleDocumentLock(Base, table=True):
     """Integration contract for applied documents; no waybill module or UI."""
 
     __tablename__ = "vehicle_document_locks"
