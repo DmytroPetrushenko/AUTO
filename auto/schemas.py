@@ -6,7 +6,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 
 class VehicleInput(BaseModel):
-    model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
+    model_config = ConfigDict(extra="forbid", allow_inf_nan=False, revalidate_instances="always")
 
     brand_id: int
     model_id: int
@@ -19,6 +19,7 @@ class VehicleInput(BaseModel):
     chassis_number: str | None = None
     serial_number: str | None = None
     unit_id: int | None = None
+    mvo_id: int | None = None
     accounting_status: Literal[
         "На обліку", "Тимчасово передано", "Передано", "Списано", "Втрачено (знищено)"
     ] = "На обліку"

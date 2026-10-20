@@ -1,7 +1,15 @@
 from datetime import date, datetime, timezone
 from uuid import uuid4
 
-from sqlalchemy import JSON, CheckConstraint, Column, ForeignKeyConstraint, Index, UniqueConstraint
+from sqlalchemy import (
+    JSON,
+    CheckConstraint,
+    Column,
+    ForeignKeyConstraint,
+    Index,
+    UniqueConstraint,
+    text,
+)
 from sqlmodel import Field, SQLModel
 
 
@@ -66,7 +74,9 @@ class Personnel(SQLModel, table=True):
     position: str | None = None
     unit_id: int | None = Field(default=None, foreign_key="units.id")
     personal_number: str | None = None
+    personal_number_normalized: str | None = Field(default=None, unique=True, index=True)
     is_active: bool = True
+    version: int = 1
 
 
 class Vehicle(SQLModel, table=True):
@@ -131,6 +141,7 @@ class Vehicle(SQLModel, table=True):
     vehicle_type_id: int = Field(foreign_key="vehicle_types.id", index=True)
     support_service_id: int = Field(foreign_key="support_services.id", index=True)
     unit_id: int | None = Field(default=None, foreign_key="units.id", index=True)
+    mvo_id: int | None = Field(default=None, foreign_key="personnel.id", index=True)
     work_unit: str
     accounting_status: str = Field(default="На обліку", index=True)
     technical_condition: str = Field(default="Не визначено", index=True)
@@ -173,6 +184,71 @@ class AuditEvent(SQLModel, table=True):
     recorded_at: datetime = Field(default_factory=utcnow, index=True)
     old_values: dict = Field(default_factory=dict, sa_column=Column(JSON, nullable=False))
     new_values: dict = Field(default_factory=dict, sa_column=Column(JSON, nullable=False))
+
+
+class VehicleHistory(SQLModel, table=True):
+    """Typed timelines; NULL valid_from means the actual start is unknown."""
+
+    __tablename__ = "vehicle_history"
+    __table_args__ = (
+        UniqueConstraint("vehicle_id", "kind", "valid_from"),
+        CheckConstraint(
+            "valid_to IS NULL OR valid_from IS NULL OR valid_to > valid_from",
+            name="ck_history_interval",
+        ),
+        CheckConstraint(
+            "kind IN ('unit','service','mvo','status','military_number',"
+            "'vin','chassis_number','serial_number')",
+            name="ck_history_kind",
+        ),
+        Index(
+            "ix_history_unknown_start",
+            "vehicle_id",
+            "kind",
+            unique=True,
+            sqlite_where=text("valid_from IS NULL"),
+        ),
+    )
+    id: str = Field(default_factory=lambda: str(uuid4()), primary_key=True)
+    vehicle_id: str = Field(foreign_key="vehicles.id", index=True)
+    kind: str = Field(index=True)
+    valid_from: date | None = Field(default=None, index=True)
+    valid_to: date | None = Field(default=None, index=True)
+    value: dict = Field(sa_column=Column(JSON, nullable=False))
+    unit_id: int | None = Field(default=None, foreign_key="units.id")
+    support_service_id: int | None = Field(default=None, foreign_key="support_services.id")
+    person_id: int | None = Field(default=None, foreign_key="personnel.id")
+    recorded_at: datetime = Field(default_factory=utcnow)
+    recorded_by: str
+    updated_at: datetime = Field(default_factory=utcnow)
+    updated_by: str
+    is_initial: bool = False
+
+
+class DuplicateApproval(SQLModel, table=True):
+    __tablename__ = "duplicate_approvals"
+    id: int | None = Field(default=None, primary_key=True)
+    vehicle_id: str = Field(foreign_key="vehicles.id", index=True)
+    field: str
+    normalized_value: str = Field(index=True)
+    matched_vehicle_ids: list = Field(sa_column=Column(JSON, nullable=False))
+    reason: str
+    approved_by: str
+    approved_role: str
+    approved_at: datetime = Field(default_factory=utcnow)
+
+
+class VehicleDocumentLock(SQLModel, table=True):
+    """Integration contract for applied documents; no waybill module or UI."""
+
+    __tablename__ = "vehicle_document_locks"
+    id: int | None = Field(default=None, primary_key=True)
+    vehicle_id: str = Field(foreign_key="vehicles.id", index=True)
+    document_reference: str = Field(unique=True)
+    document_date: date = Field(index=True)
+    snapshot: dict = Field(sa_column=Column(JSON, nullable=False))
+    registered_at: datetime = Field(default_factory=utcnow)
+    registered_by: str
 
 
 LOOKUPS = {
