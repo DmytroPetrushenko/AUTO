@@ -1,0 +1,33 @@
+name: AUTO tests
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  windows-python312:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: requirements.lock
+      - name: Create environment and install locked dependencies
+        shell: pwsh
+        run: |
+          python -m venv .venv
+          & .\.venv\Scripts\python.exe -m pip install -r requirements.lock
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & .\.venv\Scripts\python.exe -m pip install --no-deps -e .
+          exit $LASTEXITCODE
+      - name: Verify dependencies
+        run: .\.venv\Scripts\python.exe -m pip check
+      - name: Lint
+        run: .\.venv\Scripts\python.exe -m ruff check .
+      - name: Test isolated databases and UI
+        run: .\.venv\Scripts\python.exe -m pytest -q

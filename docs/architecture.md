@@ -68,3 +68,9 @@
 Захист переходу з незбереженою карткою працює всередині застосунку;
 закриття вкладки браузера/завершення процесу не гарантує збереження чернетки.
 Початкові показники не вводяться до появи окремої сутності показників.
+
+## Документація використаних інструментів
+
+- [SQLModel](https://sqlmodel.tiangolo.com/tutorial/)
+- [Alembic і SQLite](https://alembic.sqlalchemy.org/en/latest/batch.html)
+- [Streamlit AppTest](https://docs.streamlit.io/develop/api-reference/app-testing/st.testing.v1.apptest)
