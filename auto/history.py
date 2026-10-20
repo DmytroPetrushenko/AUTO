@@ -398,6 +398,7 @@ def save_card(
     confirmed=False,
     approvals=None,
     history_edit=None,
+    import_receipt=None,
 ):
     require_editor(actor)
     with Session(engine) as session:
@@ -443,6 +444,10 @@ def save_card(
             vehicle = Vehicle(**values, created_by=actor.user_id, updated_by=actor.user_id)
         session.add(vehicle)
         session.flush()
+        if import_receipt is not None:
+            from auto.models import ImportReceipt
+
+            session.add(ImportReceipt(vehicle_id=vehicle.id, **import_receipt))
         _write_history(session, vehicle.id, plan, actor)
         _approve(session, plan, actor, vehicle.id, approvals)
         audit(

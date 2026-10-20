@@ -378,3 +378,22 @@ class FilterPreset(Base, table=True):
     name: str
     normalized_name: str
     settings: dict = Field(sa_column=Column(JSON, nullable=False))
+
+
+class ImportBatch(Base, table=True):
+    __tablename__ = "import_batches"
+    id: str = Field(default_factory=lambda: str(uuid4()), primary_key=True)
+    source_name: str
+    source_hash: str
+    user_id: str
+    created_at: datetime = Field(default_factory=utcnow)
+    results: list = Field(default_factory=list, sa_column=Column(JSON, nullable=False))
+
+
+class ImportReceipt(Base, table=True):
+    __tablename__ = "import_receipts"
+    id: int | None = Field(default=None, primary_key=True)
+    batch_id: str = Field(foreign_key="import_batches.id", index=True)
+    vehicle_id: str = Field(index=True)
+    source_row: int
+    fingerprint: str = Field(unique=True, index=True)

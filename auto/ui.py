@@ -635,6 +635,11 @@ def registry_page(engine, actor):
     st.caption(f"Знайдено: {len(rows)}")
     if not rows:
         st.info("Автомобілів за цими умовами немає.")
+        from auto.ui_excel import exports
+
+        exports(
+            engine, actor, pd.DataFrame(columns=["Військовий номер", "Марка / модель"]), vehicles
+        )
         return
     frame = pd.DataFrame(rows)
     defaults = [
@@ -651,7 +656,11 @@ def registry_page(engine, actor):
     sort_by = st.selectbox("Сортування", list(frame.columns), index=2, key="registry_sort")
     reverse = st.checkbox("За спаданням", key="registry_reverse")
     frame = frame.sort_values(sort_by, ascending=not reverse, kind="stable")
-    st.dataframe(frame[columns], hide_index=True, width="stretch")
+    st.caption("Порядок колонок і рядків задають налаштування вище; експорт повторює цю таблицю.")
+    st.table(frame[columns])
+    from auto.ui_excel import exports
+
+    exports(engine, actor, frame[columns], vehicles)
     display = {
         row[
             "ID"
@@ -758,6 +767,9 @@ def main():
         st.button(
             "Довідники", on_click=request_navigation, args=(engine, "dictionaries"), key="nav_dict"
         )
+        st.button(
+            "Excel / імпорт", on_click=request_navigation, args=(engine, "excel"), key="nav_excel"
+        )
         st.caption("Локальний режим. Чернетка існує лише в поточній сесії браузера.")
     if notice := st.session_state.pop("notice", None):
         getattr(st, notice[0])(notice[1])
@@ -776,7 +788,11 @@ def main():
                 args=(engine, actor, decision),
                 key=f"pending_{decision}",
             )
-    if st.session_state.page == "card":
+    if st.session_state.page == "excel":
+        from auto.ui_excel import import_page
+
+        import_page(engine, actor)
+    elif st.session_state.page == "card":
         card_page(engine, actor)
     elif st.session_state.page == "dictionaries":
         dictionaries_page(engine, actor)

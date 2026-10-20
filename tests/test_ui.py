@@ -101,12 +101,12 @@ def test_registry_search_archive_and_columns(ui, engine, minimum, actor):
     save_vehicle(engine, minimum | {"military_number": "TEST 001"}, actor)
     save_vehicle(engine, minimum | {"accounting_status": "Списано"}, actor)
     ui.run()
-    assert len(ui.dataframe[0].value) == 1
+    assert len(ui.table[0].value) == 1
     ui.checkbox(key="include_archived").check().run()
-    assert len(ui.dataframe[0].value) == 2
+    assert len(ui.table[0].value) == 2
     ui.text_input(key="registry_search").set_value("test 001").run()
-    assert len(ui.dataframe[0].value) == 1
-    assert "Військовий номер" in ui.dataframe[0].value.columns
+    assert len(ui.table[0].value) == 1
+    assert "Військовий номер" in ui.table[0].value.columns
 
 
 def test_viewer_ui_read_only(ui, engine, minimum, actor, monkeypatch):
@@ -436,3 +436,46 @@ def test_personal_filter_ui(ui, engine, minimum, actor):
     next(b for b in ui.button if b.label == "Застосувати набір").click().run()
     assert not ui.exception
     assert ui.text_input(key="registry_search").value == "test"
+
+
+def test_excel_page_and_explicit_full_export_ui(ui, engine, minimum, actor):
+    save_vehicle(engine, minimum, actor)
+    ui.run()
+    next(b for b in ui.button if b.label == "Підготувати повний експорт").click().run()
+    assert not ui.exception and ui.session_state["export_bytes"]
+    ui.button(key="nav_excel").click().run()
+    assert not ui.exception
+    assert any("Excel" in h.value for h in ui.header)
+
+
+def test_registry_explicit_columns_and_sort_ui(ui, engine, minimum, actor):
+    save_vehicle(engine, minimum | {"military_number": "A"}, actor)
+    save_vehicle(engine, minimum | {"military_number": "Z"}, actor)
+    ui.run()
+    ui.multiselect(key="registry_columns").set_value(["Тип", "Військовий номер"]).run()
+    ui.selectbox(key="registry_sort").set_value("Військовий номер").run()
+    ui.checkbox(key="registry_reverse").check().run()
+    frame = ui.table[0].value
+    assert list(frame.columns) == ["Тип", "Військовий номер"]
+    assert frame["Військовий номер"].tolist() == ["Z", "A"]
+
+
+def test_excel_import_preview_confirm_and_mapping_change_ui(ui, engine, minimum, monkeypatch):
+    from types import SimpleNamespace
+
+    from tests.test_excel import book, source
+
+    content, _ = book([source(engine, minimum) | {"military_number": "UI-XLSX"}])
+    monkeypatch.setattr(
+        "streamlit.file_uploader",
+        lambda *a, **kw: SimpleNamespace(name="test.xlsx", getvalue=lambda: content),
+    )
+    ui.run()
+    ui.button(key="nav_excel").click().run()
+    next(b for b in ui.button if b.label == "Побудувати попередній перегляд").click().run()
+    assert not ui.exception and not list_vehicles(engine)
+    next(b for b in ui.button if b.label == "Виконати підтверджений імпорт").click().run()
+    assert not list_vehicles(engine) and any("підтвердження" in e.value for e in ui.error)
+    ui.checkbox(key="import_confirmed").check().run()
+    next(b for b in ui.button if b.label == "Виконати підтверджений імпорт").click().run()
+    assert not ui.exception and list_vehicles(engine)[0].military_number == "UI-XLSX"
